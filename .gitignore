@@ -1,0 +1,16 @@
+.upstream/
+.venv/
+.cache/
+.local/
+.p0-*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+!.env.example
+workspaces/
+node_modules/
+*.sqlite*
+*.log
+browser-profiles/

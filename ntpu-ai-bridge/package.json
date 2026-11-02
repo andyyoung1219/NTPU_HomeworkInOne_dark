@@ -1,0 +1,13 @@
+{
+  "name": "ntpu-homework-ai-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned upstream BrowserBridge with only the runtime dependencies required by P1",
+  "license": "MIT",
+  "engines": { "node": ">=20.9" },
+  "dependencies": {
+    "playwright-core": "1.64.0",
+    "sharp": "0.35.5"
+  },
+  "scripts": { "test": "node --check src/p0.cjs" }
+}

@@ -1,0 +1,34 @@
+[project]
+name = "ntpu-homework-in-one-dark"
+version = "0.1.0"
+description = "Local Moodle assignment, NTPU AI draft, and reviewed Chinese PDF workflow"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "gradio>=6.31,<7",
+  "httpx>=0.28,<1",
+  "keyring>=25,<26",
+  "pymupdf>=1.25,<2",
+  "python-docx>=1.1,<2",
+  "reportlab>=4.4,<5",
+  "fonttools>=4.60,<5",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.uv]
+# Gradio 6.31 caps Pillow <13; P1 has no image upload/editor component. This
+# security override is covered by the full UI/API/PDF suite; see SECURITY.md.
+override-dependencies = ["pillow>=13.0.0,<14"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

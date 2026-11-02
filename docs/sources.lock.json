@@ -1,0 +1,17 @@
+{
+  "verified_on": "2026-11-02",
+  "sources": {
+    "NTPUOne": {
+      "url": "https://github.com/xujk0217/NTPUOne.git",
+      "commit": "b7f07f1f5b856b7016fce80eaa0983e2d401760f",
+      "license": "All rights reserved; user-reported author permission",
+      "path": ".upstream/NTPUOne"
+    },
+    "ntpu-ai-vscode": {
+      "url": "https://github.com/xujk0217/ntpu-ai-vscode.git",
+      "commit": "f8101fb112b9b1364386becbcd8d922b68eec335",
+      "license": "MIT",
+      "path": ".upstream/ntpu-ai-vscode"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "source_commit": "f8101fb112b9b1364386becbcd8d922b68eec335",
+  "files": {
+    "src/browser.js": "ae95927a61b9f479c4b69182910689dfd00e28f0562d24175e37d9f925b52c5e",
+    "src/browser/manager.js": "e298690583d7c5e87467f52fb990868f50c54cd5f8276b19f32fdc504dd4cd8c",
+    "src/browser/diagnostics.js": "ddfb879b66cf8db2b5193f47b8a5f9d0c5a505178ee642c9cd160fb965892f37",
+    "src/browser/response-watchdog.js": "944f003e085ed37266030adb6225f3f8b05c72489fc251e1d6b674e6d7726c7f",
+    "src/security/attachments.js": "840abb6c971600df8723832ae70831b75cb688def49a6849edd9654190537c25",
+    "src/security/guard.js": "beef507f9449f1c55b112479ebaf22967afb7cab4982308a1d4519ef035e1f63",
+    "src/security/offline-ocr.js": "42b0cb41d10d50c8d246cf54cf56d4aa028d84468dee4d4e4b0d3f3244154262",
+    "src/security/ocr-worker.js": "8702157905aaa6bfff5bd61867fa179ca36db87d48cdd2b8f56545cac2fd751c",
+    "LICENSE": "39ad44d6946cba2b2565a59e4f72465438718cd56d58523f0d3f6bd237637c24"
+  }
+}

@@ -1,0 +1,39 @@
+name: Local MVP checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.7.21'
+      - name: Set up pinned sources and local dependencies
+        shell: pwsh
+        run: ./scripts/setup_dev.ps1
+      - name: Test synthetic fixtures only
+        shell: pwsh
+        run: |
+          .venv/Scripts/ruff.exe check backend frontend tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv/Scripts/python.exe -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv/Scripts/python.exe scripts/check_repository.py
+      - name: Upstream browser contracts
+        working-directory: .upstream/ntpu-ai-vscode
+        shell: pwsh
+        run: |
+          $env:NODE_PATH = (Resolve-Path ../../ntpu-ai-bridge/node_modules).Path
+          node --test test/browser-auth.test.js test/browser-manager.test.js test/browser-observer.test.js
+      - name: Runtime dependency audit
+        shell: pwsh
+        run: |
+          uv pip freeze --python .venv/Scripts/python.exe > audit-requirements.txt
+          uvx pip-audit -r audit-requirements.txt --no-deps --disable-pip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix ntpu-ai-bridge audit --omit=dev --audit-level=low
