@@ -4,7 +4,7 @@
 
 | 來源 | 使用範圍 | 原授權 |
 | --- | --- | --- |
-| https://github.com/xujk0217/NTPUOne | 執行原始 Moodle 唯讀探針與測試；以 Windows Vault 包裝原探針 | 保留所有權利；提出者確認作者允許使用，見 `docs/AUTHORIZATION.md` |
+| https://github.com/xujk0217/NTPUOne | 執行原始 Moodle 唯讀探針與測試；以 Windows Vault 包裝原探針；P2 移植 SIS 登入／橋接、AcademicReportParser v4、課表／課程對應原則 | 保留所有權利；提出者確認作者允許使用，見 `docs/AUTHORIZATION.md` |
 | https://github.com/xujk0217/ntpu-ai-vscode | 原始 BrowserBridge、安全檢查及其測試；獨立 Node 子程序包裝 | MIT，原文保存在 `LICENSES/ntpu-ai-vscode.txt` 及 vendor/LICENSE |
 
 兩個來源 checkout 放在忽略追蹤的 `.upstream/`。
@@ -25,6 +25,7 @@ Python 套件以 `uv.lock` 鎖定，P1 Node 用自己的最小 `ntpu-ai-bridge/p
 | keyring | 25.7.0 | MIT |
 | PyMuPDF | 1.28.2 | AGPL-3.0 或 Artifex 商業授權 |
 | python-docx | 1.2.0 | MIT |
+| lxml（P2 列為直接依賴） | 6.1.3 | BSD-3-Clause；底層 libxml2/libxslt 聲明見套件 |
 | pytest | 9.2.0 | MIT |
 | Ruff | 0.17.3 | MIT |
 | ReportLab | 4.5.1 | BSD |

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import gradio as gr
 
 from backend.services.study import MODES, error_code
+from frontend.data_hub import build_data_hub
 
 CSS = """
 .gradio-container {max-width:1180px!important;margin:auto!important}
@@ -222,7 +223,8 @@ def build_ui(service):
         return task["id"], STATUS.get(task["status"], task["status"]), task["draft"], task["draft"], False, links
 
     with gr.Blocks(title="NTPU Homework · 我的作業", analytics_enabled=False) as ui:
-        gr.Markdown("# NTPU Homework\n把作業資料整理成可核對的草稿。\n\n**本機優先 · P1 MVP · AI 協作後由你審閱**", elem_id="hero")
+        gr.Markdown("# NTPU Homework\n校務與教材集中管理，把作業資料整理成可核對的草稿。\n\n**本機優先 · P2 學習資料中心 · AI 協作後由你審閱**", elem_id="hero")
+        hub_refresh, hub_outputs = build_data_hub(service, ui)
         with gr.Tab("我的作業"):
             with gr.Row():
                 with gr.Column(scale=1, min_width=280):
@@ -231,6 +233,7 @@ def build_ui(service):
                     sync_button = gr.Button("同步此課程作業", variant="primary")
                     assignment = gr.Dropdown(label="作業", choices=[])
                     open_button = gr.Button("查看作業與附件")
+                    hide_button = gr.Button("私人隱藏此作業（可在資料中心恢復）")
                     info = gr.Textbox(label="截止日與來源", lines=6, interactive=False)
                 with gr.Column(scale=2):
                     description = gr.Textbox(label="Moodle 作業敘述與活動指示", lines=10, interactive=False)
@@ -280,6 +283,7 @@ def build_ui(service):
         restore_button.click(restore, outputs=[sync_status, course], api_name=False)
         course.change(assignment_options, course, assignment, api_name=False)
         sync_button.click(sync, course, [assignment, sync_status], api_name=False)
+        hide_button.click(lambda identifier: service.hide_assignment(identifier), assignment, api_name=False).then(assignment_options, course, assignment, api_name=False)
         detail_outputs = [info, description, assets, excerpt, checklist, download_status, attachment_links, approved]
         open_button.click(open_assignment, assignment, detail_outputs, api_name=False)
         assignment.change(open_assignment, assignment, detail_outputs, api_name=False)
@@ -295,8 +299,8 @@ def build_ui(service):
         export_button.click(export, [task_id, editor, reviewed], [export_status, downloads], api_name=False)
         history_button.click(history, outputs=historical, api_name=False)
         load_button.click(load_task, historical, [task_id, task_status, editor, preview, reviewed], api_name=False)
-        login_button.click(login, [username, password], [moodle_status, username, password, course], queue=False, api_name=False)
-        logout_moodle.click(lambda: logout("moodle"), outputs=moodle_status, api_name=False)
+        login_button.click(login, [username, password], [moodle_status, username, password, course], queue=False, api_name=False).then(hub_refresh, outputs=hub_outputs, api_name=False)
+        logout_moodle.click(lambda: logout("moodle"), outputs=moodle_status, api_name=False).then(hub_refresh, outputs=hub_outputs, api_name=False)
         ai_open.click(lambda: ai_action("open_login"), outputs=ai_status, api_name=False)
         ai_check.click(lambda: ai_action("login_status"), outputs=ai_status, api_name=False)
         ai_logout.click(lambda: logout("ntpu-ai"), outputs=ai_status, api_name=False)

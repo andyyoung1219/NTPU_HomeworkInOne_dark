@@ -185,20 +185,16 @@ class MoodleProbe:
             path = "/webservice" + path
         # Moodle's documented token file endpoint. Do not log this URL or any exception repr.
         url = urllib.parse.urlunsplit(parts._replace(path=path, query=""))
-        with httpx.Client(follow_redirects=False, trust_env=False, timeout=30) as client:
-            with client.stream("GET", url, params={"token": token, "forcedownload": "1"}) as response:
-                status = response.status_code
-                if status != 200:
-                    record("moodle_download", passed=False, http_status=status)
-                    raise probe.ProbeError("attachment_http_error", status)
-                chunks, size = [], 0
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > MAX_BYTES:
-                        raise probe.ProbeError("attachment_too_large")
-                    chunks.append(chunk)
-                data = b"".join(chunks)
-                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        transport = getattr(self.client, "transport", None)
+        if transport:
+            response = transport.request("GET", url, params={"token": token, "forcedownload": "1"}, max_bytes=MAX_BYTES)
+            status = response.status_code
+            if status != 200:
+                raise probe.ProbeError("attachment_http_error", status)
+            data = response.content
+            mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        else:
+            data, mime = self._download_bytes(url)
         expected_size = item.get("filesize")
         if isinstance(expected_size, int) and expected_size != len(data):
             raise probe.ProbeError("attachment_size_mismatch")
@@ -213,3 +209,21 @@ class MoodleProbe:
                size_bytes=len(data), format=suffix, pages=len(extracted),
                characters=sum(len(c["text"]) for c in extracted))
         return self.downloaded[asset_id]
+
+    def _download_bytes(self, url):
+        token, _ = self.credentials()
+        with httpx.Client(follow_redirects=False, trust_env=False, timeout=30) as client:
+            with client.stream("GET", url, params={"token": token, "forcedownload": "1"}) as response:
+                status = response.status_code
+                if status != 200:
+                    record("moodle_download", passed=False, http_status=status)
+                    raise probe.ProbeError("attachment_http_error", status)
+                chunks, size = [], 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise probe.ProbeError("attachment_too_large")
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        return data, mime

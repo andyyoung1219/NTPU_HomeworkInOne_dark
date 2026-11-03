@@ -1,4 +1,4 @@
-# P1 本機 API
+# P1 / P2 本機 API
 
 主機 `http://127.0.0.1:8766`。先開啟啟動時產生的 `/unlock/<key>` 取得 HttpOnly session
 cookie。所有 `/api/*` 需要相同 cookie；非同源 Origin 與未知 Host 拒絕。
@@ -43,3 +43,26 @@ code execution/external research 在 P1 一律拒絕。
 任務狀態：waiting_approval、running、waiting_review、exporting、completed；
 另有 failed、cancelled、blocked_auth、partial。重新啟動的中斷任務轉 partial，
 不自動重新傳送資料。P1 不提供 checkpoint 自動續跑（屬 P3）。
+
+## P2 資料中心
+
+| Method | 路徑 | 用途／JSON |
+| --- | --- | --- |
+| POST | `/api/connections/sis/start` | username/password；需與已連結 Moodle 相同本人帳號。成功讀取正式課表。 |
+| DELETE | `/api/connections/sis` | 清除記憶體校務 Session，保留本人快取。 |
+| GET | `/api/hub` | 校務連線、四種校務快照、最近課程選取、課程對應。 |
+| POST | `/api/sync/sis` | 更新課表／成績／排名／畢業進度；各來源可部分成功。 |
+| POST | `/api/hub/courses/discover?semester=115-1` | 指定學期；省略 semester 只列 inprogress。 |
+| POST | `/api/sync/moodle/full` | `{"course_ids":["1","2"]}`，限本人已列出的 1–30 門課。 |
+| GET | `/api/hub/courses/{course_id}` | 作業／教材／公告／Moodle 評分的獨立快照。 |
+| PUT | `/api/hub/mappings` | `{"sis_id":"115-1:U1234","moodle_id":"1"}`；人工確認同學期候選。 |
+| POST | `/api/materials/{id}/download` | `{"approved":true}`；下載並驗證單一教材。 |
+| GET | `/api/materials/{id}/file` | 本人已下載原檔，強制 attachment disposition。 |
+| PUT | `/api/assignments/{id}/visibility` | `{"hidden":true}` 私人隱藏；false 恢復，不變更 Moodle。 |
+| GET | `/api/courses/{id}/assignments?include_hidden=true` | 包含私人隱藏及來源已消失的歷史記錄。 |
+
+批次同步 HTTP 200 不表示全部成功；需檢查每個快照的 `error/status/stale`。
+失敗時 `data` 與 `last_synced_at` 保留上次成功資料。沒有快取則 data=null，不偽裝為空課程成功。
+SIS_SCHEMA_CHANGED、SIS_ACCOUNT_CHANGED、SIS_LOGIN_REQUIRED、SIS_REPORT_NOT_AVAILABLE、
+MOODLE_PERMISSION_DENIED、RATE_LIMITED 都是可操作的固定錯誤碼。
+資料模型與身份／來源限制詳見 [P2_DATA_MODEL.md](P2_DATA_MODEL.md)。

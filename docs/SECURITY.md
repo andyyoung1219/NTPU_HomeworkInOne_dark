@@ -32,3 +32,15 @@ Gradio 6.31.0 的 metadata 限 Pillow <13。pip-audit 在 Pillow 12.3.0 發現�
 目前只真人驗證 Windows x64。Moodle/NTPU AI 改版或登入失效仍需要重新驗證。
 OCR、複雜公式、PDF 表格語意與模型內容品質須人工核對。字型與各套件權利
 依 THIRD_PARTY_NOTICES 各項處理；沒有自動發布或提交學校資料。
+
+## P2 補充（2026-11-03）
+
+SIS 密碼、CSRF、Cookie 與 bridge formData 只在記憶體，不寫 SQLite／檔案／日誌。
+登入限正常官方表單；只允許 my.ntpu.edu.tw portal 與 cof/ohs01 精確 bridge 路徑，
+未知主機／跳轉及互動驗證立即停止。校務與 Moodle 帳號一致才可連結，跨帳號快取分區。
+校務成績與 Moodle 評分按來源保存，不由課程配對合併，不加入 AI context。
+
+教材下載需逐項核准，沿用檔案 URL／DNS 白名單與 20 MiB 上限。Office／ZIP 檢查
+解壓總量／比例／巨集；不解壓或執行。保存以 hash 命名的原檔，下載回應強制 attachment。
+外部教材 URL 只顯示，不自動帶學校憑證抓取。個人資料與驗收檔仍只放 `.local/`。
+429 尊重 Retry-After，不開新 Session 或登入來避開限制。

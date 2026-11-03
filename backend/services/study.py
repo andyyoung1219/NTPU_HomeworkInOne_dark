@@ -5,12 +5,15 @@ import re
 import shutil
 import threading
 import uuid
+from functools import wraps
 from pathlib import Path
 
+from backend.integrations.moodle import MoodleClient
 from backend.models.store import Store, now
 from backend.p0.ai import AIAdapter, AIError
 from backend.p0.evidence import ROOT
 from backend.p0.moodle import MoodleProbe, Vault, probe, validate_url
+from backend.services.data_hub import DataHub, course_metadata
 from backend.services.documents import assignment_text, parse, plain_html, requirements
 from backend.services.reports import render_pdf
 
@@ -42,6 +45,14 @@ def atomic_text(path, text):
     pending.replace(path)
 
 
+def synchronized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class StudyService:
     def __init__(self, root=None, adapter=None):
         self.root = Path(root or ROOT / ".local/app")
@@ -53,6 +64,8 @@ class StudyService:
             inspector=lambda data, ext, mime: parse(data, ext, mime, "pending")[0],
             download_dir=self.root / "incoming",
         )
+        self.moodle.client = MoodleClient()
+        self.hub = DataHub(self)
         self.user = None
         self.active_path = self.root / "active-user.json"
         if self.active_path.exists():
@@ -73,6 +86,7 @@ class StudyService:
             raise StudyError("MOODLE_LOGIN_REQUIRED")
         return self.user
 
+    @synchronized
     def adopt_vault(self):
         saved = Vault().operation("load", probe.account_key("p0"))
         if not saved:
@@ -81,10 +95,17 @@ class StudyService:
         user = hashlib.sha256(f"moodle:{saved['userid']}".encode()).hexdigest()[:24]
         if self.active_jobs:
             raise StudyError("TASK_RUNNING")
+        if self.user != user:
+            self.hub.disconnect_sis()
+            self.moodle.courses.clear()
+            self.moodle.assignments.clear()
+            self.moodle.assets.clear()
+            self.moodle.downloaded.clear()
         self.user = user
         atomic_text(self.active_path, json.dumps({"user_id": user}))
         return user
 
+    @synchronized
     def login(self, username, password):
         if self.active_jobs:
             raise StudyError("TASK_RUNNING")
@@ -98,15 +119,21 @@ class StudyService:
             raise StudyError("ACCOUNT_CHANGED_RECONNECT")
         self.moodle.credentials()
 
+    @synchronized
     def sync_courses(self):
         user = self.require_user()
         try:
             self.verify_identity()
             choices = self.moodle.inventory()
             records = [("course", key, {"id": key, "name": name, "source": "moodle",
-                                        "last_synced_at": now(), "stale": False}) for name, key in choices]
+                                        **course_metadata(self.moodle.courses.get(int(key), {})),
+                                        "scope": "inprogress", "last_synced_at": now(), "stale": False}) for name, key in choices]
+            active = {key for _, key in choices}
+            for old in self.store.list(user, "course"):
+                if old["id"] not in active and old.get("scope", "inprogress") == "inprogress":
+                    records.append(("course", old["id"], {**old, "scope": "inactive", "stale": True}))
             self.store.save_many(user, records)
-            return self.store.list(user, "course")
+            return [record[2] for record in records if record[2].get("scope") == "inprogress"]
         except Exception:
             for course in self.store.list(user, "course"):
                 course["stale"] = True
@@ -119,13 +146,18 @@ class StudyService:
             raise StudyError("NOT_FOUND_OR_NOT_AUTHORIZED")
         return value
 
+    @synchronized
     def sync_assignments(self, course_id):
         user = self.require_user()
         self.get("course", course_id)
         try:
             self.verify_identity()
             if int(course_id) not in self.moodle.courses:
-                self.moodle.inventory()
+                course = self.get("course", course_id)
+                if course.get("scope") not in (None, "inprogress", "inactive"):
+                    self.hub.discover(course["scope"])
+                else:
+                    self.moodle.inventory()
             self.moodle.list_assignments(course_id)
             token, available = self.moodle.credentials()
             modules = {}
@@ -145,6 +177,8 @@ class StudyService:
                             if module.get("modname") == "assign":
                                 modules[str(module.get("id"))] = module
                 except Exception as exc:
+                    if getattr(exc, "code", "") in {"RATE_LIMITED", "NETWORK_UNAVAILABLE", "invalidtoken"}:
+                        raise
                     text_lookup_issue = error_code(exc)
             records = []
             for key, raw in self.moodle.assignments.items():
@@ -153,9 +187,11 @@ class StudyService:
                 if "mod_assign_get_submission_status" in available:
                     try:
                         _, payload = self.moodle.client.call("mod_assign_get_submission_status", token, {"assignid": raw["id"]})
-                        submission = probe.submission_observation(payload)["individual_state"]
-                    except probe.ProbeError:
-                        pass
+                        observation = probe.submission_observation(payload)
+                        submission = "unknown" if raw.get("teamsubmission") else observation["individual_state"]
+                    except probe.ProbeError as exc:
+                        if exc.code in {"RATE_LIMITED", "NETWORK_UNAVAILABLE", "invalidtoken"}:
+                            raise
                 module = modules.get(str(raw.get("cmid")))
                 if module and str(module.get("instance")) != key:
                     module = None
@@ -172,11 +208,17 @@ class StudyService:
                              "last_synced_at": now(), "status": old.get("status", "not_downloaded")}
                     records.append(("asset", ref, asset))
                     asset_ids.append(ref)
+                previous = self.store.get(user, "assignment", key) or {}
                 records.append(("assignment", key, {"id": key, "course_id": course_id,
                     "title": raw.get("name", ""), **text, "description_lookup_issue": text_lookup_issue,
                     "source_url": f"{probe.MOODLE}/mod/assign/view.php?id={raw['cmid']}",
                     "due_at": raw.get("duedate") or None, "submission_status": submission,
-                    "asset_ids": asset_ids, "last_synced_at": now(), "stale": False}))
+                    "asset_ids": asset_ids, "last_synced_at": now(), "stale": False,
+                    "hidden": previous.get("hidden", False), "removed": False}))
+            active = set(self.moodle.assignments)
+            for old in self.assignments(course_id, include_hidden=True):
+                if old["id"] not in active:
+                    records.append(("assignment", old["id"], {**old, "removed": True, "stale": True}))
             self.store.save_many(user, records)
             return self.assignments(course_id)
         except Exception:
@@ -185,9 +227,18 @@ class StudyService:
                 self.store.save(user, "assignment", assignment["id"], assignment)
             raise
 
-    def assignments(self, course_id):
-        return [a for a in self.store.list(self.require_user(), "assignment") if a["course_id"] == course_id]
+    def assignments(self, course_id, include_hidden=False):
+        return [a for a in self.store.list(self.require_user(), "assignment") if a["course_id"] == course_id
+                and (include_hidden or not a.get("hidden") and not a.get("removed"))]
 
+    def hide_assignment(self, identifier, hidden=True):
+        with self.lock:
+            assignment = self.get("assignment", identifier)
+            assignment["hidden"] = hidden
+            self.store.save(self.require_user(), "assignment", identifier, assignment)
+            return assignment
+
+    @synchronized
     def download(self, assignment_id, asset_ids):
         user = self.require_user()
         assignment = self.get("assignment", assignment_id)
@@ -475,15 +526,19 @@ class StudyService:
                     "\n".join(json.dumps(item) for item in self.store.events(user, task_id)) + "\n")
         return task
 
+    @synchronized
     def logout(self, provider):
         if self.active_jobs:
             raise StudyError("TASK_RUNNING")
         if provider == "moodle":
+            self.hub.disconnect_sis()
             Vault().operation("delete", probe.account_key("p0"))
             self.user = None
             atomic_text(self.active_path, "{}")
         elif provider == "ntpu-ai":
             self.ai.rpc("logout")
+        elif provider == "sis":
+            self.hub.disconnect_sis()
         else:
             raise StudyError("UNKNOWN_PROVIDER")
 
@@ -491,3 +546,5 @@ class StudyService:
         for job in list(self.active_jobs.values()):
             job["cancel"].set()
         self.ai.close()
+        self.hub.sis.close()
+        self.moodle.client.transport.close()

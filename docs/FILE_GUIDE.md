@@ -240,3 +240,23 @@ NTPU AI 專用 Profile 目前位於 `%LOCALAPPDATA%/NTPU HomeworkInOne/p0/browse
 | 安裝依賴、CI、來源更新 | pyproject.toml、package.json → setup_dev.ps1、ci.yml → THIRD_PARTY_NOTICES.md |
 
 新增、刪除或搬動維護檔案時，請同步更新本文與 README 的入口連結。
+# P2 新增檔案（2026-11-03）
+
+| 檔案 | 用途 |
+| --- | --- |
+| `backend/integrations/__init__.py` | 唯讀校務整合套件。 |
+| `backend/integrations/sis.py` | 校務 CSRF 登入、精確 bridge 白名單、記憶體 Session 與本人身份。 |
+| `backend/integrations/sis_parser.py` | 固定上游課表、成績、排名、畢業進度 Parser；未知格式停止或標示未知。 |
+| `backend/integrations/moodle.py` | 沿用上游唯讀函式白名單，加入受限 HTTP transport。 |
+| `backend/integrations/transport.py` | 請求節流、bounded retry、Retry-After 冷卻、回應大小上限。 |
+| `backend/integrations/materials.py` | 教材原檔下載、MIME／檔頭／ZIP／Office／hash 檢查，不執行。 |
+| `backend/services/data_hub.py` | 獨立來源快照、指定學期、多課同步、教材／公告／本人評分、課程對應。 |
+| `frontend/data_hub.py` | 學習資料中心的校務表格、教材、公告、評分、快取狀態與人工對應。 |
+| `tests/test_sis.py` | 合成校務 Parser／登入／身份／限流契約。 |
+| `tests/test_data_hub.py` | 多課同步、快取、私人隱藏、對應衝突、API 與 AI 隱私邊界。 |
+| `tests/test_materials.py` | 原檔下載、格式、壓縮 HTTP、巨集／ZIP 限制、檔名安全。 |
+| `docs/P2_VALIDATION.md` | 工程驗證結果、限制與待完成的真人 Gate。 |
+| `docs/P2_DATA_MODEL.md` | 新增 records kinds、相容方式、來源與 Parser 契約。 |
+
+`study.py` 已接上 DataHub，作業新增 hidden/removed；`routes.py` 新增 P2 API，
+`main.py` 回報 v0.2.0。前述 P1 檔案導覽保留作為原流程說明；P2 不取代既有 AI／PDF 流程。

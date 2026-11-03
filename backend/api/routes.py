@@ -40,6 +40,23 @@ class DraftRequest(BaseModel):
     reviewed: bool = False
 
 
+class CourseSelection(BaseModel):
+    course_ids: list[str] = Field(min_length=1, max_length=30)
+
+
+class MappingRequest(BaseModel):
+    sis_id: str = Field(min_length=1, max_length=100)
+    moodle_id: str = Field(min_length=1, max_length=30)
+
+
+class DownloadApproval(BaseModel):
+    approved: bool = False
+
+
+class VisibilityRequest(BaseModel):
+    hidden: bool
+
+
 def success(value):
     return {"data": value, "meta": {"timestamp": datetime.now(UTC).isoformat()}, "error": None}
 
@@ -50,6 +67,7 @@ def routes(service):
     @api.get("/connections")
     def connections():
         return success({"moodle": "cached" if service.user else "disconnected",
+                        "sis": service.hub.sis.state if service.user and service.hub.sis_user == service.user else "disconnected",
                         "ntpu-ai": service.ai.rpc("login_status")})
 
     @api.post("/connections/moodle/start")
@@ -60,6 +78,52 @@ def routes(service):
     def moodle_restore():
         service.adopt_vault()
         return success(service.sync_courses())
+
+    @api.post("/connections/sis/start")
+    def sis_login(body: LoginRequest):
+        return success(service.hub.connect_sis(body.username, body.password))
+
+    @api.get("/hub")
+    def hub():
+        return success(service.hub.overview())
+
+    @api.post("/sync/sis")
+    def sis_sync():
+        return success(service.hub.sync_sis())
+
+    @api.post("/hub/courses/discover")
+    def discover(semester: str | None = None):
+        return success(service.hub.discover(semester))
+
+    @api.post("/sync/moodle/full")
+    def moodle_full(body: CourseSelection):
+        return success(service.hub.sync_moodle(body.course_ids))
+
+    @api.get("/hub/courses/{course_id}")
+    def course_hub(course_id: str):
+        return success(service.hub.course(course_id))
+
+    @api.put("/hub/mappings")
+    def mapping(body: MappingRequest):
+        return success(service.hub.confirm_mapping(body.sis_id, body.moodle_id))
+
+    @api.post("/materials/{asset_id}/download")
+    def material_download(asset_id: str, body: DownloadApproval):
+        if not body.approved:
+            raise StudyError("DOWNLOAD_APPROVAL_REQUIRED")
+        return success(service.hub.download_material(asset_id))
+
+    @api.get("/materials/{asset_id}/file")
+    def material_file(asset_id: str):
+        asset = service.get("material", asset_id)
+        if not asset.get("path"):
+            raise StudyError("ASSET_NOT_DOWNLOADED")
+        return FileResponse(service.safe_path(asset["path"]), filename=asset["name"],
+                            media_type="application/octet-stream", content_disposition_type="attachment")
+
+    @api.put("/assignments/{assignment_id}/visibility")
+    def visibility(assignment_id: str, body: VisibilityRequest):
+        return success(service.hide_assignment(assignment_id, body.hidden))
 
     @api.post("/connections/ntpu-ai/start")
     def ai_login():
@@ -79,9 +143,9 @@ def routes(service):
         return success(service.sync_assignments(course_id) if course_id else service.sync_courses())
 
     @api.get("/courses/{course_id}/assignments")
-    def assignments(course_id: str):
+    def assignments(course_id: str, include_hidden: bool = False):
         service.get("course", course_id)
-        return success(service.assignments(course_id))
+        return success(service.assignments(course_id, include_hidden=include_hidden))
 
     @api.get("/assignments/{assignment_id}")
     def assignment(assignment_id: str):
