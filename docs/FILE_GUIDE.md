@@ -12,6 +12,7 @@
 | `tests/test_completion.py` | 直接完成的核准、來源、公開資料、API 與阻塞結果 |
 | `tests/test_completion_format.py` | 成果報告格式、語言、來源標籤與未完成內容判定 |
 | `tests/test_completion_retries.py` | checkpoint 續跑、連續三次失敗、成功後歸零與立即停止條件 |
+| `tests/test_completion_best_effort.py` | 非致命工具失敗後保留作業、待辦完整性與語言、致命錯誤仍停止 |
 | `tests/test_completion_ui.py` | 一鍵入口、執行進度與自動前往審閱頁 |
 | `tests/test_generation_recovery.py` | AI 連線恢復、重新生成、獨立逾時與續跑預算 |
 | `tests/test_export_recovery.py` | PDF 品質失敗的可用格式保留、來源快照相容性與 ZIP hash 驗證 |
