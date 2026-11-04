@@ -28,6 +28,7 @@ class AgentOptions(BaseModel):
     max_retries: int = Field(default=1, ge=0, le=2)
     max_requests: int = Field(default=3, ge=1, le=5)
     tool_timeout: int = Field(default=60, ge=1, le=120)
+    ai_timeout: int = Field(default=180, ge=1, le=300)
     deadline_seconds: int = Field(default=600, ge=10, le=900)
     max_prompt_chars: int = Field(default=60000, ge=1000, le=100000)
 
@@ -59,6 +60,10 @@ REGISTRY = {
     "run_python": ("high", schema()),
     "generate_chart": ("medium", schema()),
     "generate_report": ("medium", schema()),
+    "prepare_completion": ("low", schema()),
+    "plan_completion": ("medium", schema()),
+    "gather_completion_data": ("external", schema()),
+    "execute_completion": ("high", schema()),
     # These tools remain behind the separate human review/export endpoint.
     "render_pdf": ("medium", schema()),
     "validate_pdf": ("low", schema()),
@@ -113,6 +118,16 @@ def make_plan(task):
             "objective": objective, "required_inputs": inputs or {},
             "expected_artifacts": outputs or [], "approval_level": REGISTRY[tool][0]}))
 
+    if request["mode"] == "complete_assignment":
+        add("prepare_completion", "讀取本次作業文字與全部支援附件")
+        add("plan_completion", "依題目自主選擇方法、資料與交付內容")
+        add("gather_completion_data", "取得選定公開資料並計算可驗證的統計")
+        add("execute_completion", "依需要產生並在隔離環境執行程式")
+        add("generate_report", "依實際完成成果撰寫完整報告", outputs=["report.md"])
+        return {"version": 1, "steps": steps, "review_tools": ["render_pdf", "validate_pdf"],
+                "limits": {key: options[key] for key in ("max_steps", "max_retries", "max_requests",
+                           "tool_timeout", "ai_timeout", "deadline_seconds", "max_prompt_chars")}}
+
     add("read_assignment", "核對本次作業與要求快照")
     add("read_document", "讀取已核准的附件節錄，保留來源位置")
     if options["selected_material_ids"]:
@@ -128,4 +143,4 @@ def make_plan(task):
     add("generate_report", "依工具證據產生可審閱草稿，缺漏明確列出", outputs=["report.md"])
     return {"version": 1, "steps": steps, "review_tools": ["render_pdf", "validate_pdf"],
             "limits": {key: options[key] for key in ("max_steps", "max_retries", "max_requests",
-                       "tool_timeout", "deadline_seconds", "max_prompt_chars")}}
+                       "tool_timeout", "ai_timeout", "deadline_seconds", "max_prompt_chars")}}
