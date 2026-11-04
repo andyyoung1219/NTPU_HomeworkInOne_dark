@@ -2,6 +2,7 @@
 
 import gradio as gr
 
+from backend.p0.ai import connection_status
 from frontend.data_hub import error_message
 
 PROVIDERS = {"moodle": "Moodle", "sis": "校務系統", "ntpu-ai": "NTPU AI"}
@@ -37,14 +38,24 @@ def check_connections(service):
             pass
     messages.append("校務系統：" + ("已連線" if states["sis"] else "尚未登入或連線已失效"))
     try:
-        result = service.ai.rpc("login_status")
-        if not result.get("ready") and result.get("authentication") == "unknown":
-            result = service.ai.rpc("connect")
+        result = connection_status(service.ai)
         states["ntpu-ai"] = bool(result.get("ready"))
+        ai_message = ai_connection_message(result)
     except Exception:
         states["ntpu-ai"] = False
-    messages.append("NTPU AI：" + ("已連線" if states["ntpu-ai"] else "請開啟專用瀏覽器登入"))
+        ai_message = "NTPU AI：連線檢查未完成，請稍後重新檢查。"
+    messages.append(ai_message)
     return states, "\n\n".join(messages)
+
+
+def ai_connection_message(status):
+    if status.get("ready"):
+        return "NTPU AI：已連線，可直接續跑或重新產生草稿。"
+    if status.get("authentication", "required") == "required":
+        return "NTPU AI：需要登入，請開啟登入視窗；完成後按「檢查／恢復 AI 連線」。"
+    if status.get("authentication") == "authenticated":
+        return "NTPU AI：登入已完成，正在交接背景連線。請關閉登入視窗後再次檢查。"
+    return "NTPU AI：背景連線尚未就緒，請稍後重新檢查；目前無法判定登入是否失效。"
 
 
 def build_connections(service, trigger, page):
