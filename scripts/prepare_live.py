@@ -1,4 +1,4 @@
-"""Prepare the explicitly selected P1 assignment locally, without any AI transmission."""
+"""Prepare the current user's first course/assignment locally, without sending AI data."""
 
 import json
 import sys
@@ -9,8 +9,7 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-launch = (ROOT / ".local/app/launch-url.txt").read_text().strip()
-base = "http://127.0.0.1:8766"
+BASE = "http://127.0.0.1:8766"
 
 
 def data(response):
@@ -21,25 +20,39 @@ def data(response):
     return payload["data"]
 
 
-with httpx.Client(trust_env=False, follow_redirects=True, timeout=120) as client:
+def prepare(client, launch, base=BASE):
+    state = {"course_id": None, "assignment_id": None, "asset_ids": [],
+             "excerpt": "", "requirements": []}
     client.get(launch).raise_for_status()
     courses = data(client.post(base + "/api/connections/moodle/restore"))
-    matches = [c for c in courses if "人工智慧代理人原理及實務" in c["name"]]
-    if len(matches) != 1:
-        raise RuntimeError("TARGET_COURSE_NOT_UNIQUE")
-    course = matches[0]
+    if not courses:
+        return state
+    course = courses[0]
+    state["course_id"] = course["id"]
     assignments = data(client.post(base + "/api/sync/moodle", params={"course_id": course["id"]}))
-    matches = [a for a in assignments if "指定作業1" in a["title"].replace(" ", "")]
-    if len(matches) != 1:
-        raise RuntimeError("TARGET_ASSIGNMENT_NOT_UNIQUE")
-    assignment = matches[0]
-    refs = assignment["asset_ids"]
-    if not refs:
-        raise RuntimeError("NO_SUPPORTED_ATTACHMENTS")
-    parsed = data(client.post(base + f"/api/assignments/{assignment['id']}/download",
-                              json={"selected_asset_ids": refs, "approved": True}))
-    state = {"course_id": course["id"], "assignment_id": assignment["id"], "asset_ids": refs,
-             "excerpt": parsed["excerpt"], "requirements": parsed["requirements"]}
+    if not assignments:
+        return state
+    assignment = assignments[0]
+    refs = assignment.get("asset_ids", [])
+    state.update(assignment_id=assignment["id"], asset_ids=refs)
+    if refs:
+        parsed = data(client.post(base + f"/api/assignments/{assignment['id']}/download",
+                                  json={"selected_asset_ids": refs, "approved": True}))
+        state.update(excerpt=parsed["excerpt"], requirements=parsed["requirements"])
+    return state
+
+
+def main():
+    launch = (ROOT / ".local/app/launch-url.txt").read_text().strip()
+    with httpx.Client(trust_env=False, follow_redirects=True, timeout=120) as client:
+        state = prepare(client, launch)
+    # Save empty selections too, so a different user's earlier selection cannot linger.
     (ROOT / ".local/app/prepared-live.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps({"prepared": True, "assets": len(refs), "characters": len(parsed["excerpt"]),
-                      "requirements": len(parsed["requirements"]), "ai_data_sent": False}))
+    refs = state["asset_ids"]
+    print(json.dumps({"prepared": state["assignment_id"] is not None,
+                      "assets": len(refs), "characters": len(state["excerpt"]),
+                      "requirements": len(state["requirements"]), "ai_data_sent": False}))
+
+
+if __name__ == "__main__":
+    main()
