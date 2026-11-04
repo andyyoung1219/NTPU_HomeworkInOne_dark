@@ -18,12 +18,34 @@ MAX_OUTPUT = 2 * 1024 * 1024
 CREATE_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def container_cli():
+    executable = shutil.which("docker")
+    if executable:
+        return executable
+    if os.name == "nt":
+        for base, suffix in (("LOCALAPPDATA", "Programs/DockerDesktop/resources/bin/docker.exe"),
+                             ("ProgramFiles", "Docker/Docker/resources/bin/docker.exe")):
+            candidate = Path(os.environ.get(base, "")) / suffix
+            if candidate.is_file():
+                return str(candidate)
+    fail("SANDBOX_NOT_AVAILABLE")
+
+
+def filesystem_path(path):
+    # Keep Docker mount arguments normal, but use extended paths for Windows IO
+    # when nested task/run directories plus SHA256 filenames exceed MAX_PATH.
+    absolute = str(Path(path).resolve())
+    if os.name == "nt" and not absolute.startswith("\\\\?\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\") else "\\\\?\\" + absolute)
+    return Path(absolute)
+
+
 class DockerRunner:
     def __init__(self, config):
         self.config = Path(config)
 
     def image(self):
-        if not shutil.which("docker") or not self.config.is_file():
+        if not self.config.is_file():
             fail("SANDBOX_NOT_AVAILABLE")
         try:
             image = json.loads(self.config.read_text(encoding="utf-8"))["image_id"]
@@ -33,10 +55,17 @@ class DockerRunner:
             fail("SANDBOX_IMAGE_NOT_PINNED")
         return image
 
+    def engine_command(self):
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        command = [container_cli()]
+        if config.get("context"):
+            command.extend(["--context", config["context"]])
+        return command
+
     def status(self):
         try:
             image = self.image()
-            info = subprocess.run(["docker", "image", "inspect", image, "--format", "{{.Os}}"],
+            info = subprocess.run([*self.engine_command(), "image", "inspect", image, "--format", "{{.Os}}"],
                 capture_output=True, timeout=5, creationflags=CREATE_FLAGS)
             return {"available": info.returncode == 0 and info.stdout.strip() == b"linux",
                     "image_id": image, "network": "none"}
@@ -63,16 +92,16 @@ class DockerRunner:
         run_id = uuid.uuid4().hex
         directory = Path(directory) / run_id
         staging = directory / "input"
-        staging.mkdir(parents=True)
+        filesystem_path(staging).mkdir(parents=True)
         hashes = {}
         for name, data in inputs.items():
             if not re.fullmatch(r"[a-f0-9]{64}\.[a-z0-9]{1,8}", name) or len(data) > 10_000_000:
                 fail("RUNNER_INPUT_INVALID")
-            (staging / name).write_bytes(data)
+            filesystem_path(staging / name).write_bytes(data)
             hashes[name] = hashlib.sha256(data).hexdigest()
-        (staging / "program.py").write_text(code, encoding="utf-8")
+        filesystem_path(staging / "program.py").write_text(code, encoding="utf-8")
         # Linux CI / rootless Docker must be able to read copies as the sandbox user.
-        for path in [directory, staging, *staging.iterdir()]:
+        for path in [filesystem_path(directory), filesystem_path(staging), *filesystem_path(staging).iterdir()]:
             os.chmod(path, 0o755 if path.is_dir() else 0o644)
         name = "ntpu-p3-" + run_id
         process = None
@@ -81,7 +110,9 @@ class DockerRunner:
         try:
             if cancel.is_set():
                 fail("CANCELLED")
-            process = subprocess.Popen(self.command(image, name, staging), stdout=subprocess.PIPE,
+            command = self.command(image, name, staging)
+            command = self.engine_command() + command[1:]
+            process = subprocess.Popen(command, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, creationflags=CREATE_FLAGS)
 
             def collect():
@@ -121,7 +152,7 @@ class DockerRunner:
                     if len(data) > 1_000_000:
                         raise ValueError()
                     target = directory / filename
-                    target.write_bytes(data)
+                    filesystem_path(target).write_bytes(data)
                     artifacts[filename] = {"sha256": hashlib.sha256(data).hexdigest(),
                                            "bytes": len(data), "path": str(target)}
             except (ValueError, TypeError, KeyError):
@@ -133,14 +164,14 @@ class DockerRunner:
                       "packages": payload.get("packages", {}), "exit_code": payload["exit_code"],
                       "stdout": payload["stdout"][:16000], "artifacts": artifacts}
             receipt = directory / "run.json"
-            receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
-            artifacts["run.json"] = {"sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
-                                     "bytes": receipt.stat().st_size, "path": str(receipt)}
+            filesystem_path(receipt).write_text(json.dumps(result, indent=2), encoding="utf-8")
+            artifacts["run.json"] = {"sha256": hashlib.sha256(filesystem_path(receipt).read_bytes()).hexdigest(),
+                                     "bytes": filesystem_path(receipt).stat().st_size, "path": str(receipt)}
             return result
         finally:
             if process:
                 try:
-                    subprocess.run(["docker", "rm", "-f", name], timeout=10,
+                    subprocess.run([*self.engine_command(), "rm", "-f", name], timeout=10,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_FLAGS)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
