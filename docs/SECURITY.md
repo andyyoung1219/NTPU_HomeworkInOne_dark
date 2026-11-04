@@ -47,7 +47,7 @@ SIS 密碼、CSRF、Cookie 與 bridge formData 只在記憶體，不寫 SQLite�
 
 ## P3 補充（2026-11-03）
 
-程式執行必須經獨立核准且有可用 Docker Linux Runner；無宿主機 fallback。
+一般工具計畫的程式執行必須經獨立核准，直接完成模式則由開始按鈕一次核准本次必要執行；兩者皆須有可用 Docker Linux Runner，無宿主機 fallback。
 完整限制與待驗收範圍見 [P3_VALIDATION.md](P3_VALIDATION.md)。不能將 mock Runner 測試當作隔離實測。
 執行只用固定 image ID，無網路、無秘密掛載、非 root、唯讀基底、CPU／記憶體／程序／檔案／時間上限。
 取消與逾時會清除對應容器。預設不安裝套件；依賴改變需重新建置與驗收映像。
@@ -56,3 +56,15 @@ LangGraph 只跑程式定義的工具圖；模型不能增設工具。JSON Schem
 LangSmith／LangChain tracing 明確停用，不傳送學校資料到觀測服務。所有重試、請求與 prompt 字元預算先保存再執行。
 Crossref 查詢只有使用者核准的文字，不帶學校 Cookie／Token，不跟隨重導向，回應限制 1 MB。
 教材只有明確選取、同課程、已下載且 hash 相符者可供 AI 使用；校務／評分不參與。
+
+## 直接完成作業補充（2026-11-04）
+
+「開始直接完成作業」核准範圍限本次選定作業的題目、全部支援附件、AI 傳送、允許的公開資料查詢與必要的隔離程式執行。
+校務成績、排名及其他課程資料不加入 context。文件、模型與工具輸出不能新增權限或任意工具；伺服器固定流程與 schema 決定可執行的動作。
+
+公開資料限固定 UCI Wine Quality 目錄與固定主題的 Crossref metadata 查詢；不攜帶學校憑證，拒絕重導向並限制下載大小。
+固定 CSV 統計可在宿主機執行，模型產生的程式一律進 Docker。建立 Runner 時優先選用 Docker Desktop 的 `desktop-linux` context，通過實際執行檢查後才替換本機設定；執行仍使用不可變 image ID 與原有隔離限制。
+
+可恢復錯誤從 checkpoint 重試，連續失敗三次停止；總期限 900 秒、AI／公開資料請求最多 18 次，重試不重設預算。
+取消、登入失效、權限不足、流量限制與期限／預算耗盡立即停止。缺少必要來源、工具或執行證據會標示阻塞事項，不得以模型推測取代實驗結果。
+完成後仍須本人審閱再匯出，不會自動繳交。2026-11-04 真實 Docker 隔離驗證已通過，AI 使用合成回覆，詳見 [P3 驗收](P3_VALIDATION.md)。
