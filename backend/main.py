@@ -61,7 +61,7 @@ def create_app(service=None, key=None):
 
     @app.get("/health")
     def health():
-        return {"ok": True, "version": "0.3.0", "phase": "P3"}
+        return {"ok": True, "version": "0.4.0", "phase": "P4"}
 
     @app.get("/unlock/{provided}")
     def unlock(provided: str):
