@@ -512,12 +512,24 @@ class StudyService:
                 sources_heading = labels.get("sources_heading", "References")
                 assert isinstance(sources_heading, str) and sources_heading.strip()
                 assert len(sources_heading) <= 120 and not any(c in sources_heading for c in "\r\n")
+                actions_heading = labels.get("actions_heading")
+                if actions_heading is not None:
+                    assert isinstance(actions_heading, str) and actions_heading.strip()
+                    assert len(actions_heading) <= 120 and not any(c in actions_heading for c in "\r\n")
                 if "completion" in model:
                     completion = model["completion"]
                     assert isinstance(completion, dict)
-                    assert completion.get("status") in {"complete", "blocked"}
+                    assert completion.get("status") in {"complete", "needs_action", "blocked"}
                     assert isinstance(completion.get("blockers"), list)
                     assert all(isinstance(item, str) for item in completion["blockers"])
+                    required_actions = completion.get("required_actions", [])
+                    assert isinstance(required_actions, list)
+                    assert all(isinstance(item, str) for item in required_actions)
+                    action_resolutions = completion.get("action_resolutions", {})
+                    assert isinstance(action_resolutions, dict)
+                    assert all(isinstance(key, str) and key.strip() and
+                               isinstance(value, str) and value.strip() and len(value) <= 4000
+                               for key, value in action_resolutions.items())
         except (ValueError, TypeError, KeyError, AssertionError):
             raise StudyError("AI_INVALID_REPORT_SCHEMA") from None
         draft = f"# {model['title']}\n\n"
@@ -529,6 +541,17 @@ class StudyService:
                 draft += f"## {sources_heading}\n\n" + "\n".join(
                     f"- {task.get('source_names', {}).get(ref, ref)} ({ref})" for ref in model["sources"])
                 draft += "\n"
+            completion = model.get("completion", {})
+            actions = list(dict.fromkeys(item.strip() for item in (
+                completion.get("required_actions", []) + model["unresolved"] + completion.get("blockers", [])
+            ) if item.strip()))
+            if actions:
+                if actions_heading is None:
+                    body = model["title"] + "".join(section["heading"] + section["content"]
+                                                   for section in model["sections"])
+                    actions_heading = "使用者待辦" if re.search(r"[\u3400-\u9fff]", body) else "Required user actions"
+                actions_heading = re.sub(r"([\\`*_{}\[\]<>#|])", r"\\\1", actions_heading.strip())
+                draft += f"\n## {actions_heading}\n\n" + "\n".join(f"- {item}" for item in actions) + "\n"
             return draft, model
         if task.get("course_name"):
             draft += f"課程：{task['course_name']}\n\n作業：{task['title']}\n\n"
@@ -577,9 +600,13 @@ class StudyService:
                 task["generated_files"][name] = {
                     "path": str(target.relative_to(self.root)),
                     "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-            if task["request"]["mode"] == "complete_assignment" and task.get("completion_execution", {}).get("result"):
+            execution = task.get("completion_execution", {})
+            if task["request"]["mode"] == "complete_assignment" and (
+                    execution.get("code") or execution.get("result")):
                 analysis = path.parent / "analysis.py"
                 if analysis.exists():
+                    if execution.get("code") and analysis.read_text(encoding="utf-8") != execution["code"]:
+                        raise StudyError("CODE_CHANGED")
                     task["generated_files"]["analysis.py"] = {
                         "path": str(analysis.relative_to(self.root)),
                         "sha256": hashlib.sha256(analysis.read_bytes()).hexdigest()}
