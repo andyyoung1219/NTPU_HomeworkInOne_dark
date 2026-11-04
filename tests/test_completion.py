@@ -24,6 +24,7 @@ class CompletionAI:
         self.dataset_id = dataset_id
         self.execution = execution
         self.report_factory = report_factory
+        self.plan_blockers = []
 
     def rpc(self, method, **kwargs):
         return {"ready": True}
@@ -35,7 +36,7 @@ class CompletionAI:
             result = {
                 "objective": "Compare measured values and explain the selected approach.",
                 "deliverable_type": "report", "dataset_id": self.dataset_id,
-                "needs_execution": self.execution, "research_query": "", "blockers": [],
+                "needs_execution": self.execution, "research_query": "", "blockers": self.plan_blockers,
             }
         elif "previous_code" in payload:
             result = {"code": "import json\nassert sum([1, 2, 3]) == 6\nprint(json.dumps({'sum': 6}))\n"}
@@ -82,7 +83,7 @@ def test_automatic_completion_reads_all_attachments_and_delivers_clean_report(au
     result = await_task(service, task["id"])
     assert result["status"] == "waiting_review", result.get("error")
     assert downloaded == [asset["id"]]
-    assert result["completion"] == {"status": "complete", "blockers": []}
+    assert result["completion"] == {"status": "complete", "blockers": [], "required_actions": []}
     assert result["request"]["selected_asset_ids"] == [asset["id"]]
     assert result["source_hashes"][asset["id"]] == hashlib.sha256(data).hexdigest()
     assert "Please submit a report" in result["completion_inputs"]["excerpt"]
@@ -93,6 +94,58 @@ def test_automatic_completion_reads_all_attachments_and_delivers_clean_report(au
     assert not result["reviewed"] and not result.get("pdf")
     assert len(service.ai.calls) == 2
     assert (service.workspace(service.user, task["id"]) / "input" / (asset["sha256"] + ".pdf")).exists()
+
+
+def test_pdf_submission_and_missing_filename_identity_do_not_block_report(automatic, monkeypatch):
+    service = automatic
+    assignment = service.get("assignment", "2")
+    assignment.update(asset_ids=[], description=(
+        "Write an English comparison report. Convert it to PDF, name it studentID_hw1.pdf "
+        "and upload to E-learning 3.0 before the deadline."
+    ))
+    service.store.save(service.user, "assignment", "2", assignment)
+    monkeypatch.setattr(service.agent.runner, "status", lambda: {"available": False})
+    original_begin = service.ai.begin
+    observed = []
+
+    def begin(prompt):
+        payload = json.loads(prompt.rsplit("\n", 1)[1])
+        capabilities = payload["application_capabilities"]
+        assert "pdf" in capabilities["reviewed_local_exports"]
+        assert capabilities["export_requires_human_review"]
+        assert not capabilities["automatic_submission"]
+        assert "省略該欄並繼續完成正文" in prompt
+        observed.append(payload)
+        return original_begin(prompt)
+
+    monkeypatch.setattr(service.ai, "begin", begin)
+    task = service.complete_assignment("2", "delivery-scope")
+    result = await_task(service, task["id"])
+    assert result["status"] == "waiting_review", result.get("error")
+    assert len(observed) == 2  # Planning and final report receive the same delivery scope.
+    assert result["completion"]["blockers"] == []
+    assert "studentID" not in result["draft"]
+    assert not result["reviewed"] and not result.get("pdf")
+
+
+def test_missing_content_becomes_an_action_and_preserves_the_available_report(automatic):
+    service = automatic
+    service.ai.plan_blockers = ["Provide the required interview data and add its analysis; interview findings are unavailable."]
+    task = service.complete_assignment("2", "required-content")
+    result = await_task(service, task["id"])
+    assert result["status"] == "waiting_review" and result["error"] is None
+    assert result["completion"]["status"] == "needs_action"
+    assert result["completion"]["blockers"] == []
+    assert result["checkpoint"]["cursor"] == 5 and result["checkpoint"]["consecutive_errors"] == 0
+    assert len(service.ai.calls) == 2
+    assert "interview data" in result["draft"] and "## Required user actions" in result["draft"]
+    assert "The supplied sources establish" in result["draft"]
+    assert not result["ready_for_export"]
+    service.save_draft(result["id"], result["draft"], reviewed=True)
+    with pytest.raises(StudyError, match="INCOMPLETE_ACCEPTANCE_REQUIRED"):
+        service.export(result["id"])
+    accepted = service.save_draft(result["id"], result["draft"], reviewed=True, accept_incomplete=True)
+    assert accepted["ready_for_export"]
 
 
 def test_completion_idempotency_and_account_scope(automatic):
@@ -115,18 +168,24 @@ def test_completion_idempotency_and_account_scope(automatic):
         service.user = user
 
 
-def test_execution_required_without_sandbox_stops_before_report(automatic, monkeypatch):
+def test_execution_without_sandbox_generates_report_with_unverified_execution_action(automatic, monkeypatch):
     service = automatic
     service.ai.execution = True
     monkeypatch.setattr(service.agent.runner, "status", lambda: {"available": False})
     task = service.complete_assignment("2", "missing-completion-runner")
     result = await_task(service, task["id"])
-    assert result["status"] == "partial"
-    assert result["error"] == "SANDBOX_NOT_AVAILABLE"
-    assert result["checkpoint"]["cursor"] == 3
+    assert result["status"] == "waiting_review" and result["error"] is None
+    assert result["completion"]["status"] == "needs_action"
+    assert result["checkpoint"]["cursor"] == 5
     assert not result["ready_for_export"]
-    assert len(service.ai.calls) == 1
-    assert not result.get("report_model")
+    assert len(service.ai.calls) == 3
+    assert "execution has not been verified" in result["draft"]
+    assert "analysis.py" in result["generated_files"]
+    code = service.safe_path(result["generated_files"]["analysis.py"]["path"]).read_bytes()
+    assert code == result["completion_execution"]["code"].encode()
+    assert not result.get("runs")
+    audit = next(a for a in result["tool_audit"] if a["tool"] == "execute_completion")
+    assert not audit["success"] and audit["warning_code"] == "SANDBOX_NOT_AVAILABLE"
 
 
 def test_public_dataset_profile_and_citations_are_real_tool_evidence(automatic, monkeypatch):
