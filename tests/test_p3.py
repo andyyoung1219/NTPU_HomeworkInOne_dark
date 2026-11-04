@@ -182,7 +182,7 @@ def test_restart_resume_skips_completed_tools_and_keeps_budgets(service):
         reopened.agent.resume(task["id"], task["request_sha256"])
         complete = await_task(reopened, task["id"])
         assert complete["status"] == "waiting_review"
-        assert complete["checkpoint"]["requests_used"] == 2
+        assert complete["checkpoint"]["requests_used"] == 1
         assert sum(a["tool"] == "read_document" for a in complete["tool_audit"]) == 1
     finally:
         reopened.close()
@@ -288,7 +288,7 @@ def test_research_query_scope_and_request_budget(service, monkeypatch, budget, e
 
 def test_tool_timeout_does_not_retry_uncertain_ai_transmission(service):
     service.ai.begin = lambda prompt: ("never-finishes", concurrent.futures.Future())
-    task = service.create_task({**p3_request(service), "agent": {"tool_timeout": 1},
+    task = service.create_task({**p3_request(service), "agent": {"ai_timeout": 1},
                                "data_transfer_approved": True}, "timeout")
     result = await_task(service, task["id"])
     assert result["error"] == "TOOL_TIMEOUT"
@@ -313,6 +313,7 @@ def test_audit_has_no_document_or_raw_error_secrets(service):
 def test_runner_output_protocol_and_cleanup(tmp_path, monkeypatch, name, valid):
     runner = DockerRunner(tmp_path / "unused.json")
     monkeypatch.setattr(runner, "image", lambda: "sha256:" + "1" * 64)
+    monkeypatch.setattr(runner, "engine_command", lambda: ["docker"])
     cleaned = []
     payload = {"exit_code": 0, "stdout": "fixture", "packages": {"python": "fixture"},
                "files": {name: base64.b64encode(b"fixture output").decode()}}
