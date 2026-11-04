@@ -5,6 +5,7 @@ import os
 import threading
 
 import pytest
+from test_completion import CompletionAI
 from test_mvp import await_task
 from test_mvp import service as service
 from test_p3 import p3_request
@@ -88,6 +89,33 @@ def test_real_sandbox_timeout_and_cancel(runner, tmp_path):
             runner.run("while True: pass", {}, tmp_path / "cancel", cancel, 30)
     finally:
         timer.cancel()
+
+
+def test_direct_completion_uses_real_container_evidence_before_review(service, runner, monkeypatch):
+    monkeypatch.setattr(service, "verify_identity", lambda: None)
+    service.agent.runner = runner
+
+    def report(payload, model):
+        evidence = payload["execution"]
+        assert evidence["exit_code"] == 0
+        assert json.loads(evidence["stdout"]) == {"sum": 6}
+        assert evidence["parameters"]["network"] == "none"
+        assert evidence["image_id"] == runner.image()
+        model["sections"][0]["content"] = "The executed program verified that 1 + 2 + 3 equals 6."
+        return model
+
+    service.ai = CompletionAI(execution=True, report_factory=report)
+    task = service.complete_assignment("2", "real-direct-completion")
+    result = await_task(service, task["id"], timeout=30)
+    assert result["status"] == "waiting_review", result.get("error")
+    assert result["completion"] == {"status": "complete", "blockers": []}
+    assert len(result["runs"]) == 1 and len(service.ai.calls) == 3
+    assert result["checkpoint"]["cursor"] == len(result["plan"]["steps"])
+    assert "The executed program verified" in result["draft"]
+    assert "TODO" not in result["draft"]
+    source = result["generated_files"]["analysis.py"]
+    assert service.safe_path(source["path"]).is_file()
+    assert not result["reviewed"] and not result.get("pdf")
 
 
 @pytest.mark.parametrize("mode", ["summary", "literature_comparison", "csv_analysis", "coding_test", "report_draft"])
