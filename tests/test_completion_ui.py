@@ -1,12 +1,14 @@
 """Direct-completion UI routing with synthetic durable task records."""
 
 import concurrent.futures
+import hashlib
 import json
 
 import pytest
 from test_mvp import service as service
 from test_mvp import task_request
 
+from backend.services.study import StudyError
 from frontend.gradio_app import build_ui, generation_status
 
 
@@ -76,6 +78,39 @@ def test_reload_polling_restores_completion_without_resending_or_overwriting_rev
     assert not service.ai.calls
 
 
+@pytest.mark.parametrize("entry", ["begin_completion", "poll_completion"])
+def test_report_with_user_actions_opens_review_without_claiming_full_completion(service, monkeypatch, entry):
+    task = completion_task(service)
+    action = "Upload the reviewed PDF to E-learning."
+    task["draft"] += "\n## Required user actions\n\n- " + action + "\n"
+    task["completion"] = {"status": "needs_action", "blockers": [], "required_actions": [action]}
+    service.store.save(service.user, "task", task["id"], task)
+    monkeypatch.setattr(service, "complete_assignment", lambda *args: task)
+    _, events = callbacks(service)
+    event = events[entry]
+    if entry == "begin_completion":
+        row = list(event.fn("2"))[-1]
+    else:
+        row = event.fn(task["id"], "generate")
+    assert row[5] == "review"
+    message = generation_status(task)
+    assert "已產生作業，請審閱並處理使用者待辦" in message
+    assert action in message
+    assert "本次自動執行已完成" not in message
+    assert not service.ai.calls
+
+
+@pytest.mark.parametrize("status", ["partial", "blocked_auth", "failed", "cancelled", "running"])
+def test_retry_message_only_promises_automatic_resume_while_running(status):
+    task = {"status": status, "request": {"mode": "complete_assignment"},
+            "checkpoint": {"consecutive_errors": 1}, "error": "COMPLETION_INPUT_REQUIRED"}
+    if status == "running":
+        task["error"] = None
+    message = generation_status(task)
+    assert ("系統將從中斷步驟自動續跑" in message) == (status == "running")
+    assert ("已停止自動續跑" in message) == (status != "running")
+
+
 def test_history_keeps_manual_form_valid_for_completion_tasks(service):
     task = completion_task(service)
     _, events = callbacks(service)
@@ -84,6 +119,38 @@ def test_history_keeps_manual_form_valid_for_completion_tasks(service):
     assert restored[11] == task["id"] and restored[13] == task["draft"]
     assert restored[20] == "review"
     assert events["restore_run_style"].fn(task["id"]) == "complete"
+
+
+@pytest.mark.parametrize("execution_state", ["failed", "succeeded", "legacy_result"])
+def test_completion_source_is_downloadable_even_without_a_successful_run(service, execution_state):
+    task = completion_task(service)
+    code = "print('available source')\n"
+    execution = {"code": code}
+    if execution_state in {"succeeded", "legacy_result"}:
+        execution["result"] = {"exit_code": 0}
+    if execution_state == "legacy_result":
+        execution.pop("code")
+    else:
+        execution["failure"] = "PYTHON_EXECUTION_FAILED" if execution_state == "failed" else None
+    task["completion_execution"] = execution
+    source = service.workspace(service.user, task["id"]) / "work/analysis.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(code, encoding="utf-8")
+    service.write_draft(service.user, task)
+    generated = task["generated_files"]["analysis.py"]
+    assert service.safe_path(generated["path"]) == source
+    assert generated["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_completion_source_modified_on_disk_is_not_registered(service):
+    task = completion_task(service)
+    task["completion_execution"] = {"code": "print('approved')\n", "failure": "PYTHON_EXECUTION_FAILED"}
+    source = service.workspace(service.user, task["id"]) / "work/analysis.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("print('changed on disk')\n", encoding="utf-8")
+    with pytest.raises(StudyError, match="CODE_CHANGED"):
+        service.write_draft(service.user, task)
+    assert "analysis.py" not in task["generated_files"]
 
 
 def test_completion_callback_runs_real_pipeline_without_requiring_unused_sandbox(service, monkeypatch):
