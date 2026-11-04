@@ -216,15 +216,22 @@ class AgentEngine:
                     "DATASET_UNAVAILABLE", "RESEARCH_UNAVAILABLE", "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED",
                     "AI_CONNECTION_PENDING",
                 }
-                if checkpoint["consecutive_errors"] >= 3:
+            exhausted = attempt >= limits["max_retries"] or (automatic and checkpoint["consecutive_errors"] >= 3)
+            if code not in retryable or exhausted:
+                from backend.agent.completion import fallback
+                result = fallback(self, user, task, step["tool"], code) if automatic else None
+                if result is None:
                     raise
-            if code not in retryable or attempt >= limits["max_retries"]:
-                raise
-            self.study.store.event(user, task["id"], "tool_retry", code)
-            if automatic:
-                self.save(user, task)
-                if self.study.active_jobs[task["id"]]["cancel"].wait(min(2 ** attempt, 4)):
-                    fail("CANCELLED")
+                task["tool_results"][step["id"]] = result
+                audit.update(warning_code=code, result_sha256=digest(result))
+                checkpoint.update(cursor=checkpoint["cursor"] + 1, in_flight=None, consecutive_errors=0)
+                self.study.store.event(user, task["id"], "tool_degraded", code)
+            else:
+                self.study.store.event(user, task["id"], "tool_retry", code)
+                if automatic:
+                    self.save(user, task)
+                    if self.study.active_jobs[task["id"]]["cancel"].wait(min(2 ** attempt, 4)):
+                        fail("CANCELLED")
         finally:
             audit.update(finished_at=now(), elapsed_seconds=round(time.monotonic() - started, 3))
             self.save(user, task)
@@ -236,7 +243,10 @@ class AgentEngine:
 
     def inputs(self, user, task):
         data = {}
-        for ref in task["request"]["selected_asset_ids"]:
+        refs = task["request"]["selected_asset_ids"]
+        if task["request"]["mode"] == "complete_assignment":
+            refs = [asset["id"] for asset in task["completion_inputs"]["assets"]]
+        for ref in refs:
             name = task["source_hashes"][ref] + Path(task["source_names"][ref]).suffix.lower()
             path = self.study.workspace(user, task["id"]) / "input" / name
             if path.stat().st_size > 10_000_000:
@@ -483,9 +493,10 @@ class AgentEngine:
         user, task = state["user"], state["task"]
         self.check(user, task)
         if task["request"]["mode"] == "complete_assignment":
-            if task.get("completion", {}).get("status") != "complete":
+            if task.get("completion", {}).get("status") not in {"complete", "needs_action"} or not task.get("draft", "").strip():
                 fail("COMPLETION_INCOMPLETE")
             task.update(status="waiting_review", error=None, ready_for_export=False)
+            task["checkpoint"].update(consecutive_errors=0, in_flight=None)
             return {"task": task}
         unresolved = task.get("report_model", {}).get("unresolved", [])
         # Semantic rubric coverage requires human review; never infer it from fluent prose.
