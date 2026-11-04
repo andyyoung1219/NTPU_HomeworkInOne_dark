@@ -48,8 +48,8 @@ def login(username, password):
     try:
         moodle.login(username, password)
         choices = moodle.inventory()
-        preferred = next((key for label, key in choices if "人工智慧代理人原理及實務" in label), None)
-        return "Moodle 本人身分已驗證。請選課程、載入作業。", "", "", gr.update(choices=choices, value=preferred)
+        return ("Moodle 本人身分已驗證。請選課程、載入作業。", "", "",
+                gr.update(choices=choices, value=choices[0][1] if choices else None))
     except Exception as error:
         return safe_error(error), "", "", gr.update(choices=[], value=None)
 
@@ -57,17 +57,18 @@ def login(username, password):
 def load_courses():
     try:
         choices = moodle.inventory()
-        preferred = next((key for label, key in choices if "人工智慧代理人原理及實務" in label), None)
-        return gr.update(choices=choices, value=preferred), "已讀取本人目前進行中的課程。"
+        return gr.update(choices=choices, value=choices[0][1] if choices else None), "已讀取本人目前進行中的課程。"
     except Exception as error:
         return gr.update(), safe_error(error)
 
 
 def assignments(course):
+    if not course:
+        return gr.update(choices=[], value=None), "尚無課程，請先讀取本人課程。"
     try:
         choices = moodle.list_assignments(course)
-        preferred = next((key for label, key in choices if "指定作業1" in label.replace(" ", "")), None)
-        return gr.update(choices=choices, value=preferred), "已讀取作業；選擇指定作業1。"
+        return gr.update(choices=choices, value=choices[0][1] if choices else None), (
+            "已讀取作業，預設選取第一份作業。" if choices else "此課程目前沒有作業。")
     except Exception as error:
         return gr.update(choices=[], value=None), safe_error(error)
 
@@ -205,7 +206,7 @@ def verify_ai(asset, excerpt, approved):
 def make_ui():
     with gr.Blocks(title="NTPU Homework · P0 驗證", analytics_enabled=False) as ui:
         gr.Markdown("# NTPU Homework · P0 整合驗證\n"
-                    "目標：**人工智慧代理人原理及實務／指定作業1**。本頁僅在你的電腦執行。\n"
+                    "預設選取本人第一門課程及其中第一份作業，沒有資料時留空。本頁僅在你的電腦執行。\n"
                     "P0 通過後才開始 P1 MVP；這裡不提交作業。")
         with gr.Tab("1 · Moodle 與附件"):
             gr.Markdown("本人帳密僅傳給官方 Moodle HTTPS，密碼不保存；Token 存 Windows Credential Manager。")
