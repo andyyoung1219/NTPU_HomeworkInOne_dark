@@ -1,7 +1,7 @@
 [project]
 name = "ntpu-homework-in-one-dark"
-version = "0.3.0"
-description = "Local learning hub with approved tool agents, isolated analysis and reviewed PDF export"
+version = "0.4.0"
+description = "Local learning dashboard, course search, recoverable homework and reviewed exports"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.115,<1",
