@@ -45,6 +45,17 @@
 > **階段界線**：版本內容是本專案的規劃，不表示來源 Repository 已支援這些功能。不得把 P3/P4 功能當成 MVP 的必要條件。
 > 
 
+### 0.4 目前實作補充（2026-11-04）
+
+目前版本為 `0.4.0`，已提供學習資料中心、首頁／課程專頁／本機搜尋、五步驟獨立畫面與 PDF／DOCX／ZIP 匯出。週／月課表、提醒與 AI CourseContext 仍屬後續規劃。
+
+「直接完成作業」在選好作業後一次核准題目與支援附件、AI、允許的公開資料及必要隔離執行，依固定流程持續到審閱頁；不自動繳交。
+成果依題目指定語言撰寫，未指定時使用繁體中文；要求具體成果與實際證據，缺少必要資料或工具時回報阻塞事項。
+可恢復錯誤從 checkpoint 自動重試，連續三次失敗即停止；總期限 900 秒、AI／公開資料請求合計最多 18 次，取消、登入／權限／流量限制及預算耗盡立即停止。
+目前公開資料能力限固定 UCI Wine Quality 目錄、固定主題 Crossref metadata 與本次作業附件；Docker 僅提供 Python 標準函式庫。
+
+完整回歸已通過 301 項（含 19 項真實 Docker 測試，AI 使用合成回覆）；真人 P2／P3 品質 Gate 與 DOCX 頁面視覺驗收仍待完成。實際使用方式、限制與證據見 `README.md`、`docs/P3_VALIDATION.md`、`docs/P4_VALIDATION.md`。
+
 ---
 
 ## 1. 專案來源與重用策略
@@ -201,7 +212,7 @@ flowchart TD
 - Gradio 初期使用同機介面；跨機部署後須重新評估身份驗證、CSRF、CORS 與連線安全。
 - SQLite 僅存最小 metadata 與加密引用；原始 Token、Cookie 禁止存入 SQLite 或一般 JSON logs。
 - Chrome/Edge/Chromium 的學校登入與 NTPU AI 登入採獨立 Profile/憑證域。
-- 完整開發環境用 `uv` 或 `venv` 鎖 Python 套件；正式 Runner 可使用 Podman/Docker 隔離，但必須驗證 Windows 容器能力。
+- 完整開發環境以 `uv.lock` 鎖 Python 套件；程式執行使用 Docker Linux Runner，Windows 使用 Docker Desktop／WSL 2 後端。Podman 的必要 tmpfs inode 限制相容性未通過，目前不支援；一般本機介面與文字生成不需要 Docker。
 
 ---
 
@@ -432,6 +443,12 @@ skills/
 ---
 
 ## 7. P4 — 完整學習中心（v0.4.0）
+
+> **2026-11-04 採用範圍調整**：依使用者選擇實作「1 儀表板、3 課程專頁、4 搜尋、7 DOCX／ZIP 匯出、8 五步驟工作恢復」。
+> 延續目前 P3 五步驟與四種處理方式，「工具計畫與續跑」入口維持關閉。
+> 週／月課表、課程筆記與 AI CourseContext、截止通知／背景排程延後，以下相關條目保留為後續規劃。
+> 本次恢復指輸入、草稿及步驟恢復；中斷的一次性 AI 呼叫由使用者重新核准建立新任務，不保證接續模型生成。
+> 實作與驗收詳見 `docs/P4_VALIDATION.md`；不能將本次選定範圍標示為原始 P4 全部功能完成。
 
 ### 7.1 儀表板
 
@@ -892,16 +909,19 @@ ntpu-study-agent/
 
 - [x]  `S6-01` LangGraph Task Plan / Tool Registry / Approval（本機 SQLite 工具邊界檢查點）。
 - [x]  `S6-02` 新增 Skills：Data Analysis / Coding / Research / Reference Checker。
-- [x]  `S6-03` Sandboxed Runner / 圖表 / 可重現報告（實作與合成驗證完成；真實隔離 Gate 待 Docker 環境驗證）。
+- [x]  `S6-03` Sandboxed Runner / 圖表 / 可重現報告（2026-11-04 真實 Docker 測試 19 項通過，AI 使用合成回覆）。
 - [x]  `S6-04` Checkpoint / Retry / Cancel / Partial Output。
 
-P3 Gate 狀態與限制：`docs/P3_VALIDATION.md`；真人 AI 與真實容器 Gate 尚不能宣告通過。
+P3 Gate 狀態與限制：`docs/P3_VALIDATION.md`；真實容器驗證已通過，真人 AI 品質 Gate 仍待驗收。
 
 ### Sprint 7 — P4 / P5 完整版
 
-- [ ]  `S7-01` Dashboard、課表、搜尋、提醒。
-- [ ]  `S7-02` 每門課獨立 CourseContext、文件檢索。
-- [ ]  `S7-03` DOCX / ZIP 選配匯出。
+- [x]  `S7-01a` Dashboard、今日課程、作業狀態與本機搜尋。
+- [ ]  `S7-01b` 週／月課表與截止提醒（本次延後）。
+- [x]  `S7-02a` 課程專頁、附件／教材檢索、來源頁碼與歷史產物。
+- [ ]  `S7-02b` 課程筆記與 AI CourseContext（本次延後）。
+- [x]  `S7-03` DOCX / ZIP 選配匯出（DOCX 結構驗證；實際 Word 版面需開啟核對）。
+- [x]  `S7-03a` 五步驟輸入、草稿與適當步驟恢復；不自動重送 AI。
 - [ ]  `S7-04` 全面安全、效能、回歸與跨平台驗收。
 - [ ]  `S7-05` v1.0 產品文件、操作教學與示範。
 
