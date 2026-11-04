@@ -26,6 +26,7 @@ RECOVERY_ERRORS = {
     "AI_AUTH_REQUIRED": "請先檢查／恢復 AI 連線；確定需要登入時，再開啟登入視窗。",
     "AI_CONNECTION_PENDING": "AI 背景連線尚未就緒，請先檢查／恢復 AI 連線。",
     "TASK_DEADLINE_EXCEEDED": "原任務已超過總時限，請按「重新產生草稿」。",
+    "COMPLETION_INPUT_REQUIRED": "先前任務因資料缺漏停止。請按「重新產生草稿」，套用先生成可用內容並列出使用者待辦的流程。",
 }
 
 
@@ -34,6 +35,11 @@ def generation_status(task):
     automatic = task.get("request", {}).get("mode") == "complete_assignment"
     if automatic and task["status"] == "running":
         label = "正在直接完成作業"
+    completion = task.get("completion", {})
+    required_actions = completion.get("required_actions", [])
+    if automatic and task["status"] in {"waiting_review", "completed"} and (
+            completion.get("status") == "needs_action" or required_actions):
+        label = "已產生作業，請審閱並處理使用者待辦"
     if task.get("error"):
         code = task["error"]
         label += "\n" + RECOVERY_ERRORS.get(code, "請查看下方續跑說明。") + f"（{code}）"
@@ -45,9 +51,12 @@ def generation_status(task):
             label += "\n目前步驟：" + plan["steps"][cursor]["objective"]
     if automatic and checkpoint.get("consecutive_errors"):
         count = checkpoint["consecutive_errors"]
-        label += f"\n連續失敗 {count}／3 次。" + ("已停止自動續跑。" if count >= 3 else "系統將從中斷步驟自動續跑。")
+        stopped = count >= 3 or task["status"] != "running"
+        label += f"\n連續失敗 {count}／3 次。" + ("已停止自動續跑。" if stopped else "系統將從中斷步驟自動續跑。")
     if automatic and task.get("completion", {}).get("blockers"):
         label += "\n尚待處理：" + "、".join(task["completion"]["blockers"])
+    if automatic and required_actions:
+        label += "\n使用者待辦：" + "、".join(required_actions)
     return label
 
 
@@ -256,7 +265,11 @@ def build_ui(service):
             note = "程式檔由下方草稿中的程式區塊產生，修改後按「保存修改」更新檔案。\n\n" if task["request"]["mode"] == "code_solution" else ""
             if task["request"]["mode"] == "complete_assignment":
                 completion = task.get("completion", {})
-                if completion.get("blockers"):
+                if completion.get("status") == "needs_action" or completion.get("required_actions"):
+                    note = "已產生作業，請審閱並處理報告末尾的使用者待辦。\n\n"
+                    if completion.get("required_actions"):
+                        note += "使用者待辦：" + "、".join(completion["required_actions"]) + "。\n\n"
+                elif completion.get("blockers"):
                     note = "本次成果尚有待處理項目：" + "、".join(completion["blockers"]) + "。\n\n"
                 elif completion.get("status") == "complete":
                     note = "本次自動執行已完成，請核對成果、來源與題目要求後匯出。\n\n"
@@ -548,7 +561,6 @@ def build_ui(service):
             gr.HTML('<div id="welcome" class="page-heading"><p class="eyebrow">YOUR PERSONAL CAMPUS SPACE</p>'
                     '<h1 tabindex="-1">今天，想先做什麼？</h1>'
                     '<p>掌握學習近況，或專心完成一份作業。<br>選擇你的工作空間，從這裡開始。</p></div>')
-            learning = build_learning(service, ui)
             with gr.Row(equal_height=True):
                 with gr.Column(elem_classes="center-card", min_width=280):
                     gr.HTML('<div class="card-icon">▤</div><h2>學習資料中心</h2>'
@@ -561,6 +573,7 @@ def build_ui(service):
                             '<div class="card-meta">選作業 / AI 協作 / 審閱 / 匯出</div>')
                     enter_homework = gr.Button("進入懶人作業中心 →", variant="primary")
                     enter_completion = gr.Button("直接完成作業 →")
+            learning = build_learning(service, ui)
             gr.HTML('<p class="home-note">個人資料保存在本機 · AI 傳送由你核准 · 非臺北大學官方產品</p>')
         with gr.Column(visible=False, elem_id="page-hub", elem_classes="app-page") as pages["hub"]:
             hub_refresh, hub_outputs = build_data_hub(service, ui)
@@ -571,8 +584,9 @@ def build_ui(service):
             completion_scope = gr.Markdown(
                 "選好作業後按「開始直接完成作業」，即核准系統讀取這份作業的附件、傳給 AI，"
                 "並視需要查找公開資料及在隔離環境執行程式。系統會自動執行到審閱與匯出；"
-                "逾時會從中斷步驟續跑，連續失敗三次停止。需要執行程式時，須先備妥 Docker 隔離環境；"
-                "缺少必要資料、登入或執行環境時會顯示阻塞原因。最後由你審閱與匯出，不會自動繳交。",
+                "逾時會從中斷步驟續跑；AI 連續失敗三次停止。非致命的資料或工具問題會先產出可用作業，"
+                "在報告末尾列出使用者待辦。缺少 Docker 時會標示程式尚未執行；登入失效或完全無法生成才停止。"
+                "最後由你審閱與匯出，不會自動繳交。",
                 visible=False)
             with gr.Row():
                 with gr.Column(scale=1, min_width=280, elem_classes="surface"):
