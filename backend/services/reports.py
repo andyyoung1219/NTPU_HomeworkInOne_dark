@@ -64,8 +64,13 @@ def _render_pdf(markdown, output, images):
                            spaceAfter=8, wordWrap="CJK", alignment=TA_LEFT)
     headings = {i: ParagraphStyle(f"H{i}", parent=style, fontSize={1: 21, 2: 14, 3: 11.5}[i],
                                   leading={1: 29, 2: 22, 3: 19}[i], spaceBefore=12,
+                                  # Reserve one glyph for CJK hanging punctuation
+                                  # so large headings remain inside page bounds.
+                                  rightIndent={1: 21, 2: 14, 3: 11.5}[i],
                                   spaceAfter=9, keepWithNext=True) for i in (1, 2, 3)}
     cell_style = ParagraphStyle("Cell", parent=style, fontSize=9, leading=14, spaceAfter=0)
+    code_style = ParagraphStyle("Code", parent=style, fontSize=9, leading=13,
+                                spaceAfter=0, wordWrap=None, leftIndent=8)
     story, lines = [], markdown.splitlines()
     index, in_code = 0, False
     while index < len(lines):
@@ -81,6 +86,16 @@ def _render_pdf(markdown, output, images):
             continue
         if line.startswith("```"):
             in_code = not in_code
+            index += 1
+            continue
+        if in_code:
+            # Preserve indentation and literal operators/markup in program text.
+            # Normal prose cleanup would remove ** and backticks from source code.
+            if line:
+                literal = html.escape(line.expandtabs(4)).replace(" ", "&#160;")
+                story.append(Paragraph(literal, code_style))
+            else:
+                story.append(Spacer(1, code_style.leading))
             index += 1
             continue
         if not in_code and line.startswith("|") and index + 1 < len(lines) and re.match(r"^\|?[\s:|-]+$", lines[index + 1]):
