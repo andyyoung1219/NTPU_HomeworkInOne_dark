@@ -14,6 +14,20 @@ class AIError(Exception):
     pass
 
 
+def connection_status(adapter, *, timeout_seconds=60, cancel=None):
+    """Restore the existing browser session before deciding that login is needed."""
+    deadline = time.monotonic() + timeout_seconds
+
+    def call(method):
+        options = {"timeout_seconds": max(0.1, deadline - time.monotonic()), "cancel": cancel}
+        return adapter.rpc(method, **options) if isinstance(adapter, AIAdapter) else adapter.rpc(method)
+
+    status = call("login_status")
+    if not status.get("ready") and status.get("authentication") == "unknown" and not status.get("loginWindow"):
+        status = call("connect")
+    return status
+
+
 class AIAdapter:
     def __init__(self):
         self.process = None
@@ -88,6 +102,7 @@ class AIAdapter:
         self.jobs[task_id] = future
         try:
             self.rpc("start_task", task_id=task_id, prompt=prompt, approved=True, asset_ref=asset_ref,
+                     timeout_ms=max(1, min(300000, int(timeout_seconds * 1000))),
                      timeout_seconds=timeout_seconds, cancel=cancel)
         except Exception:
             self.jobs.pop(task_id, None)
