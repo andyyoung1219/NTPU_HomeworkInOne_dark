@@ -23,27 +23,32 @@ async function dispatch(method, params) {
     case 'open_login':
       await bridge.openLogin();
       return { login_window: true };
-    case 'connect':
+    case 'connect': {
       await bridge.open();
-      return { ready: (await bridge.status()).ready };
+      const status = await bridge.status();
+      return { ready: status.ready, authentication: status.authentication || 'unknown' };
+    }
     case 'logout':
       await bridge.logout();
       return { ready: false };
     case 'login_status': {
       const status = bridge.mode === 'login' ? await bridge.finishLogin() : await bridge.status();
-      return { ready: status.ready, authentication: status.authentication || 'unknown' };
+      return { ready: status.ready, authentication: status.authentication || 'unknown',
+        loginWindow: !!status.loginWindow };
     }
     case 'start_task': {
       if (jobs.size) throw new Error('BUSY');
       if (!/^[a-z0-9-]{1,80}$/.test(params.task_id || '')) throw new Error('INVALID_REQUEST');
       if (params.approved !== true) throw new Error('APPROVAL_REQUIRED');
       if (typeof params.prompt !== 'string' || params.prompt.length > 48000) throw new Error('INVALID_REQUEST');
+      if (params.timeout_ms !== undefined && (!Number.isInteger(params.timeout_ms)
+          || params.timeout_ms < 1 || params.timeout_ms > 300000)) throw new Error('INVALID_REQUEST');
       // Reference only; never accept or resolve caller-provided file paths.
       if (params.asset_ref && !/^[a-f0-9]{24}$/.test(params.asset_ref)) throw new Error('INVALID_REFERENCE');
       const controller = new AbortController();
       jobs.set(params.task_id, controller);
       void bridge.chat(params.prompt, {
-        signal: controller.signal, timeoutMs: 90000,
+        signal: controller.signal, timeoutMs: params.timeout_ms ?? 180000,
         onToken: () => output({ event: 'progress', task_id: params.task_id }),
       }).then(result => output({ event: 'completed', task_id: params.task_id, text: result.text }))
         .catch(error => output({ event: 'failed', task_id: params.task_id, code: code(error) }))
