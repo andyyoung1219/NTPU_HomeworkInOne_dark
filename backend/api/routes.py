@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.agent.contracts import REGISTRY, AgentOptions
+from backend.services.exports import export_extra
 from backend.services.study import StudyError, error_code
 
 
@@ -58,12 +59,63 @@ class DownloadApproval(BaseModel):
     approved: bool = False
 
 
+class ExportRequest(BaseModel):
+    kind: str = "docx"
+    include_sources: bool = False
+
+
+class CompletionRequest(BaseModel):
+    approved: bool = False
+
+
+class ProgressRequest(BaseModel):
+    course_id: str | None = None
+    assignment_id: str | None = None
+    selected_asset_ids: list[str] = Field(default_factory=list, max_length=20)
+    task_id: str | None = None
+    page: str = "select"
+    mode: str = "report_draft"
+    instruction: str = Field(default="", max_length=4000)
+    excerpt: str = Field(default="", max_length=24000)
+    requirements: str = Field(default="", max_length=6000)
+    editor: str = Field(default="", max_length=80000)
+
+
 def success(value):
     return {"data": value, "meta": {"timestamp": datetime.now(UTC).isoformat()}, "error": None}
 
 
 def routes(service):
     api = APIRouter()
+
+    @api.get("/dashboard")
+    def dashboard():
+        return success(service.learning.dashboard())
+
+    @api.get("/learning/courses/{course_id}")
+    def learning_course(course_id: str):
+        return success(service.learning.course(course_id))
+
+    @api.get("/search")
+    def search(q: str = "", course_id: str | None = None,
+               due_from: str | None = None, due_to: str | None = None):
+        return success(service.learning.search(q, course_id, due_from, due_to))
+
+    @api.post("/search/rebuild")
+    def rebuild_search():
+        return success(service.learning.rebuild_index())
+
+    @api.get("/workflow/progress")
+    def progress():
+        return success(service.learning.progress())
+
+    @api.put("/workflow/progress")
+    def save_progress(body: ProgressRequest):
+        return success(service.learning.save_progress(body.model_dump()))
+
+    @api.post("/tasks/{task_id}/export-extra")
+    def extra_export(task_id: str, body: ExportRequest):
+        return success(export_extra(service, task_id, body.kind, body.include_sources))
 
     @api.get("/tools")
     def tools():
@@ -170,6 +222,12 @@ def routes(service):
     def create_task(body: TaskRequest, idempotency_key: str = Header()):
         return success(service.create_task(body.model_dump(), idempotency_key))
 
+    @api.post("/assignments/{assignment_id}/complete", status_code=202)
+    def complete_assignment(assignment_id: str, body: CompletionRequest, idempotency_key: str = Header()):
+        if not body.approved:
+            raise StudyError("COMPLETION_APPROVAL_REQUIRED")
+        return success(service.complete_assignment(assignment_id, idempotency_key))
+
     @api.get("/tasks")
     def tasks():
         return success(service.store.list(service.require_user(), "task"))
@@ -231,6 +289,16 @@ def routes(service):
             path, mime = workspace / "work/report.md", "text/markdown"
         elif kind == "manifest" and task.get("pdf"):
             path, mime = workspace / "output/manifest.json", "application/json"
+        elif kind in {"docx", "zip"} and kind in task.get("exports", {}):
+            import hashlib
+            item = task["exports"][kind]
+            path = service.safe_path(item["path"])
+            if not path.resolve().is_relative_to(workspace.resolve()):
+                raise StudyError("PATH_OUTSIDE_WORKSPACE")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+                raise StudyError("ARTIFACT_CHANGED")
+            mime = ("application/zip" if kind == "zip" else
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         else:
             raise StudyError("ARTIFACT_NOT_AVAILABLE")
         return FileResponse(path, filename=path.name, media_type=mime)
