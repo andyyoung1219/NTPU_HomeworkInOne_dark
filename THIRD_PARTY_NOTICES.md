@@ -31,6 +31,8 @@ Python 套件以 `uv.lock` 鎖定，P1 Node 用自己的最小 `ntpu-ai-bridge/p
 | ReportLab | 4.5.1 | BSD |
 | fonttools | 4.68.0 | MIT |
 | Pillow（安全覆寫） | 13.0.0 | MIT-CMU |
+| LangGraph | 1.2.19 | MIT |
+| jsonschema | 4.26.0 | MIT |
 | playwright-core | 1.64.0 | Apache-2.0 |
 | sharp | 0.35.5 | Apache-2.0 |
 | Noto Sans TC | docs/font.lock.json 固定 commit | SIL Open Font License 1.1；字型不提交 Git |

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.agent.contracts import REGISTRY, AgentOptions
 from backend.services.study import StudyError, error_code
 
 
@@ -29,15 +30,19 @@ class TaskRequest(BaseModel):
     data_transfer_approved: bool = False
     allow_external_research: bool = False
     allow_code_execution: bool = False
+    agent: AgentOptions = Field(default_factory=AgentOptions)
 
 
 class ApproveRequest(BaseModel):
     request_sha256: str
+    code_execution_approved: bool = False
+    external_research_approved: bool = False
 
 
 class DraftRequest(BaseModel):
     markdown: str = Field(min_length=1, max_length=80000)
     reviewed: bool = False
+    accept_incomplete: bool = False
 
 
 class CourseSelection(BaseModel):
@@ -53,16 +58,18 @@ class DownloadApproval(BaseModel):
     approved: bool = False
 
 
-class VisibilityRequest(BaseModel):
-    hidden: bool
-
-
 def success(value):
     return {"data": value, "meta": {"timestamp": datetime.now(UTC).isoformat()}, "error": None}
 
 
 def routes(service):
     api = APIRouter()
+
+    @api.get("/tools")
+    def tools():
+        return success({"registry": {name: {"approval_level": level, "input_schema": contract}
+                                      for name, (level, contract) in REGISTRY.items()},
+                        "sandbox": service.agent.runner.status()})
 
     @api.get("/connections")
     def connections():
@@ -121,10 +128,6 @@ def routes(service):
         return FileResponse(service.safe_path(asset["path"]), filename=asset["name"],
                             media_type="application/octet-stream", content_disposition_type="attachment")
 
-    @api.put("/assignments/{assignment_id}/visibility")
-    def visibility(assignment_id: str, body: VisibilityRequest):
-        return success(service.hide_assignment(assignment_id, body.hidden))
-
     @api.post("/connections/ntpu-ai/start")
     def ai_login():
         return success(service.ai.rpc("open_login"))
@@ -143,9 +146,9 @@ def routes(service):
         return success(service.sync_assignments(course_id) if course_id else service.sync_courses())
 
     @api.get("/courses/{course_id}/assignments")
-    def assignments(course_id: str, include_hidden: bool = False):
+    def assignments(course_id: str, include_removed: bool = False):
         service.get("course", course_id)
-        return success(service.assignments(course_id, include_hidden=include_hidden))
+        return success(service.assignments(course_id, include_removed=include_removed))
 
     @api.get("/assignments/{assignment_id}")
     def assignment(assignment_id: str):
@@ -177,7 +180,13 @@ def routes(service):
 
     @api.post("/tasks/{task_id}/approve", status_code=202)
     def approve(task_id: str, body: ApproveRequest):
-        return success(service.approve(task_id, body.request_sha256))
+        return success(service.approve(task_id, body.request_sha256, body.code_execution_approved,
+                                       body.external_research_approved))
+
+    @api.post("/tasks/{task_id}/resume", status_code=202)
+    def resume(task_id: str, body: ApproveRequest):
+        return success(service.agent.resume(task_id, body.request_sha256, body.code_execution_approved,
+                                           body.external_research_approved))
 
     @api.post("/tasks/{task_id}/cancel")
     def cancel(task_id: str):
@@ -185,7 +194,7 @@ def routes(service):
 
     @api.put("/tasks/{task_id}/draft")
     def draft(task_id: str, body: DraftRequest):
-        return success(service.save_draft(task_id, body.markdown, body.reviewed))
+        return success(service.save_draft(task_id, body.markdown, body.reviewed, body.accept_incomplete))
 
     @api.post("/tasks/{task_id}/export")
     def export(task_id: str):
@@ -225,6 +234,27 @@ def routes(service):
         else:
             raise StudyError("ARTIFACT_NOT_AVAILABLE")
         return FileResponse(path, filename=path.name, media_type=mime)
+
+    @api.get("/tasks/{task_id}/artifacts/{name}")
+    def tool_artifact(task_id: str, name: str):
+        import hashlib
+        task = service.get("task", task_id)
+        # Names are registry outputs, never filesystem paths supplied by a client.
+        results = [{"artifacts": task.get("generated_files", {})}]
+        results.extend(reversed(list(task.get("tool_results", {}).values())))
+        for result in results:
+            artifact = result.get("artifacts", {}).get(name)
+            if artifact:
+                path = service.safe_path(artifact["path"])
+                if not path.resolve().is_relative_to(service.workspace(service.user, task_id).resolve()):
+                    raise StudyError("PATH_OUTSIDE_WORKSPACE")
+                if hashlib.sha256(path.read_bytes()).hexdigest() != artifact["sha256"]:
+                    raise StudyError("ARTIFACT_CHANGED")
+                chart = name == "chart.png" and result.get("independently_verified") is True
+                return FileResponse(path, filename=name,
+                                    media_type="image/png" if chart else "application/octet-stream",
+                                    content_disposition_type="inline" if chart else "attachment")
+        raise StudyError("ARTIFACT_NOT_AVAILABLE")
 
     @api.get("/assets/{asset_id}/preview")
     def preview(asset_id: str):

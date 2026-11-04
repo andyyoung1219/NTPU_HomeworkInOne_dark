@@ -36,8 +36,11 @@ class ReadTransport:
                                 raise probe.ProbeError("RESPONSE_TOO_LARGE")
                             chunks.append(chunk)
                         # iter_bytes already decodes content-encoding; do not decode gzip twice.
-                        headers = {k: v for k, v in response.headers.items()
-                                   if k.lower() not in {"content-encoding", "content-length"}}
+                        # Preserve wire bytes: Moodle may put a non-ASCII filename
+                        # in Content-Disposition. Passing decoded header strings
+                        # back to httpx would try to encode them as ASCII.
+                        headers = [(k, v) for k, v in response.headers.raw
+                                   if k.lower() not in {b"content-encoding", b"content-length"}]
                         result = httpx.Response(response.status_code, headers=headers,
                                                 content=b"".join(chunks), request=response.request)
                 except (httpx.TimeoutException, httpx.NetworkError):

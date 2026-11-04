@@ -92,18 +92,18 @@ def test_multi_course_sync_dedup_stable_ids_and_source_separation(hub_service):
     assert service.ai.calls == []
 
 
-def test_hidden_assignment_tombstone_survives_sync_and_restart(hub_service):
+def test_previously_hidden_assignments_are_visible_before_and_after_sync(hub_service):
     service = hub_service
     service.sync_assignments("1")
-    service.hide_assignment("101")
-    assert service.sync_assignments("1") == []
-    assert len(service.assignments("1", include_hidden=True)) == 1
+    assignment = service.get("assignment", "101")
+    service.store.save(service.user, "assignment", "101", {**assignment, "hidden": True})
+    assert len(service.assignments("1")) == 1
     reopened = StudyService(service.root, FakeAI())
     reopened.user = service.user
-    assert reopened.get("assignment", "101")["hidden"]
+    assert len(reopened.assignments("1")) == 1
     reopened.close()
-    service.hide_assignment("101", False)
-    assert len(service.assignments("1")) == 1
+    assert len(service.sync_assignments("1")) == 1
+    assert "hidden" not in service.get("assignment", "101")
 
 
 def test_removed_assignment_retained_for_history_but_hidden_from_active_list(hub_service, monkeypatch):
@@ -312,14 +312,14 @@ def test_hub_api_auth_approval_and_secret_validation(hub_service):
     with TestClient(create_app(service, key="synthetic-session"), base_url=ORIGIN) as client:
         assert client.get("/api/hub").status_code == 401
         client.get("/unlock/synthetic-session")
-        assert client.get("/health").json()["phase"] == "P2"
+        assert client.get("/health").json()["phase"] == "P3"
         assert client.post("/api/sync/moodle/full", json={"course_ids": []}).status_code == 422
         assert client.post("/api/sync/moodle/full", json={"course_ids": ["1", "2"]}).status_code == 200
         assert client.get("/api/hub/courses/1").json()["data"]["grades"]["source"] == "moodle"
         assert client.post("/api/materials/unknown/download", json={"approved": False}).json()["error"]["code"] == "DOWNLOAD_APPROVAL_REQUIRED"
-        assert client.put("/api/assignments/101/visibility", json={"hidden": True}).status_code == 200
-        assert client.get("/api/courses/1/assignments").json()["data"] == []
-        assert len(client.get("/api/courses/1/assignments?include_hidden=true").json()["data"]) == 1
+        assert client.put("/api/assignments/101/visibility", json={"hidden": True}).status_code == 404
+        assert len(client.get("/api/courses/1/assignments").json()["data"]) == 1
+        assert len(client.get("/api/courses/1/assignments?include_removed=true").json()["data"]) == 1
         response = client.post("/api/connections/sis/start", json={"username": "fixture", "password": {"raw": "SENSITIVE_VALUE"}})
         assert response.status_code == 422 and "SENSITIVE_VALUE" not in response.text
         service.user = "b" * 24

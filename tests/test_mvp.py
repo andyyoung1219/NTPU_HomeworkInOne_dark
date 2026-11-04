@@ -64,8 +64,8 @@ def task_request(service):
             "instruction": "整理題目要求", "mode": "report_draft", "data_transfer_approved": False}
 
 
-def await_task(service, task_id):
-    deadline = time.monotonic() + 5
+def await_task(service, task_id, timeout=5):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         task = service.get("task", task_id)
         if task["status"] != "running":
@@ -101,7 +101,7 @@ def test_other_user_asset_and_execution_are_rejected(service):
     request = task_request(service)
     with pytest.raises(StudyError, match="ASSET_SCOPE_MISMATCH"):
         service.create_task({**request, "selected_asset_ids": ["other"]}, "other")
-    with pytest.raises(StudyError, match="MVP_TOOL_NOT_ALLOWED"):
+    with pytest.raises(StudyError, match="PYTHON_CODE_REQUIRED"):
         service.create_task({**request, "allow_code_execution": True}, "code")
     service.user = "c" * 24
     with pytest.raises(StudyError, match="NOT_FOUND_OR_NOT_AUTHORIZED"):
@@ -128,7 +128,7 @@ def test_cjk_pdf_requires_review_and_survives_restart(service):
     task = await_task(service, task["id"])
     with pytest.raises(StudyError, match="REVIEW_REQUIRED"):
         service.export(task["id"])
-    service.save_draft(task["id"], task["draft"], reviewed=True)
+    service.save_draft(task["id"], task["draft"], reviewed=True, accept_incomplete=True)
     finished = service.export(task["id"])
     assert finished["status"] == "completed"
     path = service.safe_path(finished["pdf"])

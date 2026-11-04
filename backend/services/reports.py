@@ -15,7 +15,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from reportlab.platypus import Image, LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 
 from backend.p0.evidence import ROOT
 from backend.p0.moodle import probe
@@ -48,12 +48,12 @@ def clean_inline(text):
     return html.escape(text)
 
 
-def render_pdf(markdown, output):
+def render_pdf(markdown, output, images=None):
     with _render_lock:
-        return _render_pdf(markdown, output)
+        return _render_pdf(markdown, output, images or {})
 
 
-def _render_pdf(markdown, output):
+def _render_pdf(markdown, output, images):
     font_path = prepare_font()
     with FontToolsFont(font_path) as font:
         supported = font.getBestCmap()
@@ -70,6 +70,15 @@ def _render_pdf(markdown, output):
     index, in_code = 0, False
     while index < len(lines):
         line = lines[index].rstrip()
+        picture = re.fullmatch(r"!\[([^\]]*)\]\(([^)]+)\)", line)
+        if not in_code and picture and picture[2] in images:
+            # Only caller-verified artifacts; Markdown cannot request local/remote reads.
+            chart = Image(str(images[picture[2]]))
+            chart.drawHeight *= min(1, (A4[0] - 100) / chart.drawWidth, 300 / chart.drawHeight)
+            chart.drawWidth = chart.drawHeight * chart.imageWidth / chart.imageHeight
+            story.extend([chart, Paragraph(clean_inline(picture[1]), cell_style), Spacer(1, 12)])
+            index += 1
+            continue
         if line.startswith("```"):
             in_code = not in_code
             index += 1

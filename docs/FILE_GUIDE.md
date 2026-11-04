@@ -3,6 +3,21 @@
 更新日期：2026-11-02。依目前實際程式整理，涵蓋專案原始碼、設定、文件、測試與引入的上游模組。
 安裝套件與執行產物依類型列在最後，方便在 VS Code 檔案總管辨識。
 
+## P3 新增檔案（2026-11-03）
+
+| 檔案 | 用途 |
+| --- | --- |
+| `backend/agent/contracts.py` | TaskPlan、工具白名單、JSON Schema、執行預算、CSV 程式模板 |
+| `backend/agent/engine.py` | LangGraph 工具流程、核准執行、持久檢查點、重試／取消、Crossref、統計重算與圖表 |
+| `backend/agent/runner.py` | Docker CLI 隔離執行、限制輸出、逾時清理；不在宿主機執行 Python 輸入 |
+| `runner/Dockerfile`、`runner/supervisor.py` | 最小標準函式庫映像與容器內輸出收集 |
+| `frontend/agent_tools.py` | 工具計畫預覽、分級核准、教材與 CSV 選取、執行紀錄和續跑 |
+| `scripts/setup_runner.py` | 明確建置 Runner，保存不可變 image ID |
+| `scripts/validate_p3.py` | 執行合成或真實 Runner gate，保存每案例成功／失敗原因 |
+| `tests/test_p3.py`、`tests/test_p3_sandbox.py` | 合成流程與真實 Docker 隔離測試分離 |
+| `skills/{academic-research,coding-assistant,data-analysis,reference-checker}/SKILL.md` | 操作指引與證據要求，不能授權工具 |
+| `docs/P3_VALIDATION.md` | 使用方式、Runner 安裝、驗收證據與未完成 Gate |
+
 ## 1. 第一次看，先讀這五個檔案
 
 1. [README.md](../README.md)：如何安裝、啟動與使用。
@@ -253,7 +268,7 @@ NTPU AI 專用 Profile 目前位於 `%LOCALAPPDATA%/NTPU HomeworkInOne/p0/browse
 | `backend/services/data_hub.py` | 獨立來源快照、指定學期、多課同步、教材／公告／本人評分、課程對應。 |
 | `frontend/data_hub.py` | 學習資料中心的校務表格、教材、公告、評分、快取狀態與人工對應。 |
 | `tests/test_sis.py` | 合成校務 Parser／登入／身份／限流契約。 |
-| `tests/test_data_hub.py` | 多課同步、快取、私人隱藏、對應衝突、API 與 AI 隱私邊界。 |
+| `tests/test_data_hub.py` | 多課同步、快取、舊作業可見性、對應衝突、API 與 AI 隱私邊界。 |
 | `tests/test_materials.py` | 原檔下載、格式、壓縮 HTTP、巨集／ZIP 限制、檔名安全。 |
 | `docs/P2_VALIDATION.md` | 工程驗證結果、限制與待完成的真人 Gate。 |
 | `docs/P2_DATA_MODEL.md` | 新增 records kinds、相容方式、來源與 Parser 契約。 |

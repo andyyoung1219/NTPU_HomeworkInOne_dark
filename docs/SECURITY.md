@@ -44,3 +44,15 @@ SIS 密碼、CSRF、Cookie 與 bridge formData 只在記憶體，不寫 SQLite�
 解壓總量／比例／巨集；不解壓或執行。保存以 hash 命名的原檔，下載回應強制 attachment。
 外部教材 URL 只顯示，不自動帶學校憑證抓取。個人資料與驗收檔仍只放 `.local/`。
 429 尊重 Retry-After，不開新 Session 或登入來避開限制。
+
+## P3 補充（2026-11-03）
+
+程式執行必須經獨立核准且有可用 Docker Linux Runner；無宿主機 fallback。
+完整限制與待驗收範圍見 [P3_VALIDATION.md](P3_VALIDATION.md)。不能將 mock Runner 測試當作隔離實測。
+執行只用固定 image ID，無網路、無秘密掛載、非 root、唯讀基底、CPU／記憶體／程序／檔案／時間上限。
+取消與逾時會清除對應容器。預設不安裝套件；依賴改變需重新建置與驗收映像。
+
+LangGraph 只跑程式定義的工具圖；模型不能增設工具。JSON Schema、固定路徑與核准快照共同限制能力。
+LangSmith／LangChain tracing 明確停用，不傳送學校資料到觀測服務。所有重試、請求與 prompt 字元預算先保存再執行。
+Crossref 查詢只有使用者核准的文字，不帶學校 Cookie／Token，不跟隨重導向，回應限制 1 MB。
+教材只有明確選取、同課程、已下載且 hash 相符者可供 AI 使用；校務／評分不參與。

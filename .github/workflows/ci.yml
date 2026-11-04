@@ -3,6 +3,32 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  p3-sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare locked runtime and upstream parser
+        run: |
+          uv sync --locked
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          source = json.loads(Path('docs/sources.lock.json').read_text())['sources']['NTPUOne']
+          subprocess.run(['git', 'clone', source['url'], source['path']], check=True)
+          subprocess.run(['git', '-C', source['path'], 'checkout', '--detach', source['commit']], check=True)
+          PY
+      - name: Build isolated runner
+        run: uv run python scripts/setup_runner.py
+      - name: Real isolation and repeated task gate (synthetic AI)
+        env:
+          NTPU_TEST_RUNNER: '1'
+        run: uv run python scripts/validate_p3.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p3-sandbox-gate
+          path: .local/p3/validation.json
   windows:
     runs-on: windows-latest
     steps:

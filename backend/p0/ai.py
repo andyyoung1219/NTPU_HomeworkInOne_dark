@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import subprocess
 import threading
+import time
 import uuid
 
 from .evidence import ROOT
@@ -58,7 +59,7 @@ class AIAdapter:
                     future.set_exception(AIError("AI_BRIDGE_EXITED"))
             futures.clear()
 
-    def rpc(self, method, **params):
+    def rpc(self, method, *, timeout_seconds=120, cancel=None, **params):
         self.start()
         identifier = str(uuid.uuid4())
         future = concurrent.futures.Future()
@@ -66,14 +67,28 @@ class AIAdapter:
             self.requests[identifier] = future
             self.process.stdin.write(json.dumps({"id": identifier, "method": method, "params": params}) + "\n")
             self.process.stdin.flush()
-        return future.result(timeout=120)
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise AIError("CANCELLED")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                try:
+                    return future.result(timeout=min(0.2, remaining))
+                except concurrent.futures.TimeoutError:
+                    continue
+        finally:
+            self.requests.pop(identifier, None)
 
-    def begin(self, prompt, asset_ref=None):
-        task_id = "p0-" + uuid.uuid4().hex
+    def begin(self, prompt, asset_ref=None, *, timeout_seconds=120, cancel=None, task_id=None):
+        task_id = task_id or "p0-" + uuid.uuid4().hex
         future = concurrent.futures.Future()
         self.jobs[task_id] = future
         try:
-            self.rpc("start_task", task_id=task_id, prompt=prompt, approved=True, asset_ref=asset_ref)
+            self.rpc("start_task", task_id=task_id, prompt=prompt, approved=True, asset_ref=asset_ref,
+                     timeout_seconds=timeout_seconds, cancel=cancel)
         except Exception:
             self.jobs.pop(task_id, None)
             raise

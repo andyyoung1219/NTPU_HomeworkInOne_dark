@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import uuid
 from functools import wraps
 from pathlib import Path
@@ -17,7 +18,10 @@ from backend.services.data_hub import DataHub, course_metadata
 from backend.services.documents import assignment_text, parse, plain_html, requirements
 from backend.services.reports import render_pdf
 
-MODES = {"summary": "摘要題目", "plan": "提出解題規劃", "report_draft": "產生報告草稿"}
+WORKFLOW_MODES = {"summary": "摘要題目", "plan": "提出解題規劃", "report_draft": "產生報告草稿",
+                  "code_solution": "程式解題"}
+MODES = {**WORKFLOW_MODES,
+         "literature_comparison": "文獻比較", "csv_analysis": "CSV 分析與圖表", "coding_test": "程式測試"}
 TERMINAL = {"waiting_review", "completed", "failed", "cancelled", "blocked_auth", "partial"}
 
 
@@ -31,7 +35,9 @@ def error_code(error):
     if isinstance(error, (StudyError, probe.ProbeError)):
         return error.code
     if isinstance(error, AIError):
-        return str(error)
+        code = str(error)
+        return code if code in {"AI_AUTH_REQUIRED", "AI_SERVICE_LIMIT", "AI_TIMEOUT", "CANCELLED",
+                                "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED", "RATE_LIMITED", "PERMISSION_DENIED"} else "AI_BRIDGE_ERROR"
     if isinstance(error, (TimeoutError, concurrent.futures.TimeoutError)):
         return "OPERATION_TIMEOUT"
     return "OPERATION_FAILED"
@@ -75,6 +81,8 @@ class StudyService:
         self.lock = threading.RLock()
         self.ai_lock = threading.Lock()
         self.active_jobs = {}
+        from backend.agent.engine import AgentEngine
+        self.agent = AgentEngine(self)
         if self.user:
             for task in self.store.list(self.user, "task"):
                 if task["status"] in {"running", "planning", "exporting"}:
@@ -208,15 +216,14 @@ class StudyService:
                              "last_synced_at": now(), "status": old.get("status", "not_downloaded")}
                     records.append(("asset", ref, asset))
                     asset_ids.append(ref)
-                previous = self.store.get(user, "assignment", key) or {}
                 records.append(("assignment", key, {"id": key, "course_id": course_id,
                     "title": raw.get("name", ""), **text, "description_lookup_issue": text_lookup_issue,
                     "source_url": f"{probe.MOODLE}/mod/assign/view.php?id={raw['cmid']}",
                     "due_at": raw.get("duedate") or None, "submission_status": submission,
                     "asset_ids": asset_ids, "last_synced_at": now(), "stale": False,
-                    "hidden": previous.get("hidden", False), "removed": False}))
+                    "removed": False}))
             active = set(self.moodle.assignments)
-            for old in self.assignments(course_id, include_hidden=True):
+            for old in self.assignments(course_id, include_removed=True):
                 if old["id"] not in active:
                     records.append(("assignment", old["id"], {**old, "removed": True, "stale": True}))
             self.store.save_many(user, records)
@@ -227,16 +234,9 @@ class StudyService:
                 self.store.save(user, "assignment", assignment["id"], assignment)
             raise
 
-    def assignments(self, course_id, include_hidden=False):
+    def assignments(self, course_id, include_removed=False):
         return [a for a in self.store.list(self.require_user(), "assignment") if a["course_id"] == course_id
-                and (include_hidden or not a.get("hidden") and not a.get("removed"))]
-
-    def hide_assignment(self, identifier, hidden=True):
-        with self.lock:
-            assignment = self.get("assignment", identifier)
-            assignment["hidden"] = hidden
-            self.store.save(self.require_user(), "assignment", identifier, assignment)
-            return assignment
+                and (include_removed or not a.get("removed"))]
 
     @synchronized
     def download(self, assignment_id, asset_ids):
@@ -300,8 +300,6 @@ class StudyService:
         user = self.require_user()
         if not idempotency_key or len(idempotency_key) > 100:
             raise StudyError("IDEMPOTENCY_KEY_REQUIRED")
-        if request.get("allow_external_research") or request.get("allow_code_execution"):
-            raise StudyError("MVP_TOOL_NOT_ALLOWED")
         mode = request.get("mode", "report_draft")
         if mode not in MODES:
             raise StudyError("INVALID_MODE")
@@ -322,6 +320,10 @@ class StudyService:
         normalized = {"assignment_id": assignment["id"], "selected_asset_ids": selected,
                       "mode": mode, "instruction": instruction, "excerpt": excerpt,
                       "requirements": str(request.get("requirements", ""))[:6000]}
+        options, materials, material_chunks = self.agent.prepare(request, assignment, assets)
+        normalized.update(agent=options, material_chunks=material_chunks,
+                          allow_code_execution=bool(request.get("allow_code_execution")),
+                          allow_external_research=bool(request.get("allow_external_research")))
         text_hash = hashlib.sha256(description.encode()).hexdigest() if description.strip() else None
         normalized["description_sha256"] = text_hash
         digest = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
@@ -341,39 +343,69 @@ class StudyService:
             if text_hash:
                 task["source_hashes"]["assignment-description"] = text_hash
                 task["source_names"]["assignment-description"] = "Moodle 作業說明與活動指示"
+            for material in materials:
+                ref = "material:" + material["id"]
+                task["source_hashes"][ref] = material["sha256"]
+                task["source_names"][ref] = material["name"]
+            self.agent.initialize(task)
             workspace = self.workspace(user, identifier)
             if text_hash:
                 atomic_text(workspace / "input/assignment-description.txt", description)
-            for asset in assets:
+            for asset in assets + materials:
                 snapshot = workspace / "input" / (asset["sha256"] + Path(asset["name"]).suffix.lower())
                 snapshot.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(self.safe_path(asset["path"]), snapshot)
+                data = self.safe_path(asset["path"]).read_bytes()
+                if len(data) > 10_000_000:
+                    raise StudyError("INPUT_SIZE_INVALID")
+                if hashlib.sha256(data).hexdigest() != asset["sha256"]:
+                    raise StudyError("ASSET_CHANGED")
+                snapshot.write_bytes(data)
             atomic_text(workspace / "extracted/assignment_requirements.json",
                         json.dumps({"requirements": normalized["requirements"],
                                     "source_hashes": task["source_hashes"]}, ensure_ascii=False))
             self.store.save(user, "task", identifier, task)
             self.store.event(user, identifier, "waiting_approval")
-        if request.get("data_transfer_approved") is True:
+        if request.get("data_transfer_approved") is True and not (
+                normalized["allow_code_execution"] or normalized["allow_external_research"]):
             return self.approve(identifier, digest)
         return task
 
-    def approve(self, task_id, snapshot_hash):
+    def approve(self, task_id, snapshot_hash, high=False, external=False, resume=False):
         user = self.require_user()
         with self.lock:
             task = self.get("task", task_id)
-            if task["status"] != "waiting_approval" or task["request_sha256"] != snapshot_hash:
+            allowed_status = {"partial", "cancelled", "blocked_auth", "failed"} if resume else {"waiting_approval"}
+            if task["status"] not in allowed_status or task["request_sha256"] != snapshot_hash:
                 raise StudyError("APPROVAL_SNAPSHOT_MISMATCH")
+            if task.get("plan"):
+                from backend.agent.contracts import digest
+                from backend.agent.engine import deadline
+                if digest(task["plan"]) != task["plan_sha256"]:
+                    raise StudyError("PLAN_CHANGED")
+                if task["request"]["allow_code_execution"] and not high:
+                    raise StudyError("CODE_APPROVAL_REQUIRED")
+                if task["request"]["allow_external_research"] and not external:
+                    raise StudyError("EXTERNAL_APPROVAL_REQUIRED")
+                if task["request"]["allow_code_execution"] and not self.agent.runner.status()["available"]:
+                    raise StudyError("SANDBOX_NOT_AVAILABLE")
+                if resume and time.time() > task["deadline_at"]:
+                    raise StudyError("TASK_DEADLINE_EXCEEDED")
+                task["deadline_at"] = task.get("deadline_at") or deadline(task["request"]["agent"])
+                task["approvals"] = {"high": high, "external": external, "snapshot": snapshot_hash,
+                                     "approved_at": now()}
             for ref, expected in task["source_hashes"].items():
+                if ref.startswith("crossref:"):
+                    continue  # Runtime evidence, not an input snapshot.
                 if ref == "assignment-description":
                     current = self.get("assignment", task["assignment_id"])["description"].encode()
                 else:
-                    asset = self.get("asset", ref)
+                    asset = self.get("material", ref.removeprefix("material:")) if ref.startswith("material:") else self.get("asset", ref)
                     current = self.safe_path(asset["path"]).read_bytes()
                 if hashlib.sha256(current).hexdigest() != expected:
                     raise StudyError("ASSET_CHANGED")
             if not self.ai_lock.acquire(blocking=False):
                 raise StudyError("AI_BUSY")
-            task.update(status="running", approved_at=now())
+            task.update(status="running", approved_at=now(), reviewed=False, ready_for_export=False)
             self.store.save(user, "task", task_id, task)
             self.store.event(user, task_id, "running")
             self.active_jobs[task_id] = {"cancel": threading.Event(), "bridge_id": None}
@@ -381,6 +413,8 @@ class StudyService:
             return task
 
     def _run(self, user, task):
+        if task.get("plan"):
+            return self.agent.run(user, task)
         job = self.active_jobs[task["id"]]
         try:
             status = self.ai.rpc("login_status")
@@ -447,7 +481,7 @@ class StudyService:
             assert isinstance(model["title"], str) and model["title"].strip()
             assert isinstance(model["sections"], list) and 0 < len(model["sections"]) <= 30
             assert isinstance(model["sources"], list) and isinstance(model["unresolved"], list)
-            allowed = set(task["source_hashes"]) | {"assignment-description"}
+            allowed = set(task["source_hashes"])
             assert set(model["sources"]) <= allowed
             for section in model["sections"]:
                 assert isinstance(section["heading"], str) and isinstance(section["content"], str)
@@ -457,7 +491,12 @@ class StudyService:
         draft = f"# {model['title']}\n\n"
         if task.get("course_name"):
             draft += f"課程：{task['course_name']}\n\n作業：{task['title']}\n\n"
-        draft += "> AI 協作草稿。尚未執行程式或實驗；所有實作與數據須由本人完成及核對。\n\n"
+        if task.get("runs"):
+            draft += "> AI 協作草稿。程式執行範圍以附錄 run_id 與工具證據為準；推論與作業要求仍需本人核對。\n\n"
+        elif task.get("request", {}).get("mode") == "code_solution":
+            draft += "> AI 產生的程式解題草稿。程式尚未執行，請審閱程式並驗證測試案例。\n\n"
+        else:
+            draft += "> AI 協作草稿。尚未執行程式或實驗；所有實作與數據須由本人完成及核對。\n\n"
         for section in model["sections"]:
             draft += f"## {section['heading']}\n\n{section['content']}\n\n"
         draft += "## 來源\n\n" + "\n".join(f"- {task.get('source_names', {}).get(ref, ref)}（{ref}）" for ref in model["sources"])
@@ -468,9 +507,35 @@ class StudyService:
     def workspace(self, user, task_id):
         return self.root / "workspaces" / user / task_id
 
+    @staticmethod
+    def code_blocks(markdown):
+        return re.findall(r"^```([\w+#-]+)[^\n]*\n(.*?)^```[ \t]*$", markdown, re.M | re.S)
+
     def write_draft(self, user, task):
         path = self.workspace(user, task["id"]) / "work/report.md"
         atomic_text(path, task["draft"])
+        if task["request"]["mode"] == "code_solution":
+            extensions = {"python": "py", "py": "py", "javascript": "js", "js": "js",
+                          "typescript": "ts", "ts": "ts", "java": "java", "c": "c",
+                          "cpp": "cpp", "c++": "cpp", "csharp": "cs", "cs": "cs",
+                          "r": "r", "sql": "sql", "html": "html", "css": "css",
+                          "json": "json", "text": "txt"}
+            task["generated_files"] = {}
+            blocks = self.code_blocks(task["draft"])
+            for index, (language, content) in enumerate(blocks, 1):
+                suffix = extensions.get(language.lower(), "txt")
+                name = f"solution_{index}.{suffix}"
+                if suffix == "java":
+                    public_class = re.search(r"\bpublic\s+(?:final\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)", content)
+                    if public_class:
+                        name = public_class[1] + ".java"
+                if name in task["generated_files"]:
+                    name = f"solution_{index}.{suffix}"
+                target = path.parent / "generated" / name
+                atomic_text(target, content)
+                task["generated_files"][name] = {
+                    "path": str(target.relative_to(self.root)),
+                    "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
         return path
 
     def cancel(self, task_id):
@@ -479,20 +544,37 @@ class StudyService:
         if job:
             job["cancel"].set()
             if job["bridge_id"]:
-                self.ai.rpc("cancel_task", task_id=job["bridge_id"])
+                threading.Thread(target=self._cancel_bridge, args=(job["bridge_id"],), daemon=True).start()
         elif task["status"] == "waiting_approval":
             task["status"] = "cancelled"
             self.store.save(self.user, "task", task_id, task)
         return task
 
-    def save_draft(self, task_id, markdown, reviewed=False):
+    def _cancel_bridge(self, bridge_id):
+        try:
+            if isinstance(self.ai, AIAdapter):
+                self.ai.rpc("cancel_task", task_id=bridge_id, timeout_seconds=3)
+            else:
+                self.ai.rpc("cancel_task", task_id=bridge_id)
+        except Exception:
+            pass
+
+    def save_draft(self, task_id, markdown, reviewed=False, accept_incomplete=False):
         with self.lock:
             task = self.get("task", task_id)
             if task["status"] not in TERMINAL or not markdown.strip() or len(markdown) > 80000:
                 raise StudyError("DRAFT_NOT_EDITABLE")
-            task.update(draft=markdown, reviewed=reviewed, status="waiting_review", edited_at=now())
-            self.store.save(self.user, "task", task_id, task)
+            incomplete = task.get("plan") and task["checkpoint"]["cursor"] < len(task["plan"]["steps"])
+            status = task["status"] if incomplete and not reviewed else "waiting_review"
+            task.update(draft=markdown, reviewed=reviewed, status=status, edited_at=now())
+            if task.get("plan"):
+                task["accepted_incomplete"] = bool(reviewed and accept_incomplete)
+                task["ready_for_export"] = bool(reviewed and (
+                    not task.get("blockers") or task["accepted_incomplete"]))
+            task.pop("pdf", None)
+            task.pop("qa", None)
             self.write_draft(self.user, task)
+            self.store.save(self.user, "task", task_id, task)
             return task
 
     def export(self, task_id):
@@ -501,11 +583,31 @@ class StudyService:
             task = self.get("task", task_id)
             if not task["reviewed"] or task["status"] not in {"waiting_review", "completed"}:
                 raise StudyError("REVIEW_REQUIRED")
+            if task.get("plan") and not task.get("ready_for_export"):
+                raise StudyError("INCOMPLETE_ACCEPTANCE_REQUIRED")
             task["status"] = "exporting"
             self.store.save(user, "task", task_id, task)
         output = self.workspace(user, task_id) / "output"
+        export_started = now()
         try:
-            qa = render_pdf(task["draft"], output / "report.pdf")
+            images = {}
+            if task.get("statistics_verified"):
+                for result in task.get("tool_results", {}).values():
+                    if not result.get("independently_verified"):
+                        continue
+                    chart = result.get("artifacts", {}).get("chart.png")
+                    if chart:
+                        path = self.safe_path(chart["path"])
+                        if hashlib.sha256(path.read_bytes()).hexdigest() != chart["sha256"]:
+                            raise StudyError("ARTIFACT_CHANGED")
+                        images["chart.png"] = path
+            qa = render_pdf(task["draft"], output / "report.pdf", images=images)
+            if task.get("plan"):
+                for tool, result in (("render_pdf", qa["sha256"]), ("validate_pdf", qa)):
+                    task["tool_audit"].append({"tool": tool, "step_id": "human-export", "attempt": 1,
+                        "success": True, "started_at": export_started, "finished_at": now(),
+                        "input_sha256": hashlib.sha256(task["draft"].encode()).hexdigest(),
+                        "result": result, "artifact_hashes": {"report.pdf": qa["sha256"]}})
             manifest = {"schema_version": 1, "source_hashes": task["source_hashes"],
                         "request_sha256": task["request_sha256"], "model_task_id": task.get("model_task_id"),
                         "task_id": task_id,
@@ -513,10 +615,23 @@ class StudyService:
                         "tools": ["parse_document", "ntpu_ai_draft", "local_pdf_render", "pdf_validate"],
                         "artifact_sha256": qa["sha256"], "validation": qa, "exported_at": now(),
                         "unresolved": task.get("report_model", {}).get("unresolved", []),
-                        "human_reviewed": True, "experiments_executed": False}
+                        "human_reviewed": True, "experiments_executed": False,
+                        "generated_files": task.get("generated_files", {})}
+            if task.get("plan"):
+                manifest.update(schema_version=2, plan=task["plan"], plan_sha256=task["plan_sha256"],
+                    checkpoint=task["checkpoint"], tool_audit=task["tool_audit"], runs=task.get("runs", []),
+                    tools=[a["tool"] for a in task["tool_audit"]] + ["render_pdf", "validate_pdf"],
+                    skills={name: "0.3.0" for name in task.get("skills", [])},
+                    experiments_executed=any(r["exit_code"] == 0 for r in task.get("runs", [])),
+                    statistics_verified=task.get("statistics_verified", False), coverage=task.get("coverage", []),
+                    accepted_incomplete=task.get("accepted_incomplete", False), blockers=task.get("blockers", []))
             atomic_text(output / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             task.update(status="completed", pdf=str((output / "report.pdf").relative_to(self.root)), qa=qa, error=None)
         except Exception as error:
+            if task.get("plan"):
+                task["tool_audit"].append({"tool": "render_pdf", "step_id": "human-export",
+                    "success": False, "started_at": export_started, "finished_at": now(),
+                    "error_code": error_code(error)})
             task.update(status="waiting_review", error=error_code(error))
             self.store.save(user, "task", task_id, task)
             raise

@@ -7,7 +7,7 @@ import gradio as gr
 from backend.services.study import error_code
 
 ERRORS = {
-    "MOODLE_LOGIN_REQUIRED": "請先在「連線管理」登入 Moodle，或在「我的作業」恢復 Moodle 連線。",
+    "MOODLE_LOGIN_REQUIRED": "請先在「連線管理」登入 Moodle，檢查並恢復 Moodle 連線。",
     "moodle_login_required": "Moodle 連線尚未建立，請先恢復或重新登入 Moodle。",
     "invalidtoken": "Moodle 連線已過期，請先重新登入 Moodle，再連結校務。",
     "ACCOUNT_CHANGED_RECONNECT": "目前 Moodle 帳號尚未重新驗證，請先恢復 Moodle 連線。",
@@ -120,17 +120,6 @@ def build_data_hub(service, ui):
                 gr.update(choices=[(m["sis_id"] + " · " + m["name"], m["sis_id"]) for m in maps], value=None),
                 gr.update(choices=choices(), value=None))
 
-    def connect(username, password):
-        try:
-            result = hub.connect_sis(username, password)
-            if result.get("error"):
-                message = "校務入口登入成功，但課表尚未讀取。" + error_label(result["error"])
-            else:
-                message = "校務已連結；課表已讀取，可同步成績、排名與畢業進度。"
-        except Exception as exc:
-            message = error_message(exc)
-        return message, "", ""
-
     def sync_sis():
         try:
             result = hub.sync_sis()
@@ -163,7 +152,7 @@ def build_data_hub(service, ui):
 
     def course_view(identifier):
         if not identifier:
-            return "", [], [], [], gr.update(choices=[], value=None), "", gr.update(choices=[], value=None)
+            return "", [], [], [], gr.update(choices=[], value=None), ""
         try:
             data = hub.course(identifier)
             rows, posts, grades, files = [], [], [], []
@@ -183,13 +172,11 @@ def build_data_hub(service, ui):
                 files += [a for a in post["attachments"] if a.get("id")]
             for item in data["grades"].get("data") or []:
                 grades.append([item["name"], item["grade"], item["range"], item["percentage"], "Moodle 評分"])
-            hidden = [a for a in service.assignments(identifier, include_hidden=True) if a.get("hidden")]
             return ("\n".join(k + "：" + snapshot_label(s) for k, s in data.items()), rows, posts, grades,
                     gr.update(choices=[(f"{a['name']} · {a.get('size_bytes') or '?'} bytes", a["id"]) for a in files], value=None),
-                    f"[在 Moodle 查看課程與不支援的教材格式](https://lms3.ntpu.edu.tw/course/view.php?id={identifier})",
-                    gr.update(choices=[(a["title"], a["id"]) for a in hidden], value=None))
+                    f"[在 Moodle 查看課程與不支援的教材格式](https://lms3.ntpu.edu.tw/course/view.php?id={identifier})")
         except Exception as exc:
-            return error_message(exc), [], [], [], gr.update(choices=[], value=None), "", gr.update(choices=[], value=None)
+            return error_message(exc), [], [], [], gr.update(choices=[], value=None), ""
 
     def download(ref, approved):
         if not approved:
@@ -211,22 +198,10 @@ def build_data_hub(service, ui):
         except Exception as exc:
             return error_message(exc)
 
-    def restore_hidden(identifier):
-        try:
-            service.hide_assignment(identifier, False)
-            return "已恢復顯示作業。"
-        except Exception as exc:
-            return error_message(exc)
-
-    with gr.Tab("學習資料中心"):
-        gr.Markdown("## 校務與 Moodle\n資料保存在本機。校務成績、Moodle 評分分開顯示；不會自動傳給 AI。\n\n"
-                    "[新版校務入口](https://my.ntpu.edu.tw/) · [Moodle](https://lms3.ntpu.edu.tw/)")
-        with gr.Accordion("連結本人校務帳號", open=False):
-            gr.Markdown("先連結 Moodle，再使用相同本人帳號登入校務。校務 Session 僅保留至本次關閉或登出。")
-            sis_username = gr.Textbox(label="校務帳號", type="password")
-            sis_password = gr.Textbox(label="校務密碼", type="password")
-            connect_button = gr.Button("登入校務並讀取課表")
-            disconnect_button = gr.Button("登出校務")
+    with gr.Column():
+        gr.HTML('<div class="page-heading"><p class="eyebrow">STUDENT / 學習資料中心</p>'
+                '<h1 tabindex="-1">我的學習資料</h1><p>課表、成績與學習進度，集中在這裡。</p></div>')
+        gr.Markdown("資料保存在本機；成績與教材不會自動傳給 AI。需要登入時，請點右上角「連線管理」。")
         connection = gr.Textbox(label="校務連線", interactive=False)
         with gr.Row():
             sis_sync = gr.Button("同步課表、歷年成績、排名與畢業進度", variant="primary")
@@ -265,10 +240,6 @@ def build_data_hub(service, ui):
         material_download = gr.Button("下載選定教材")
         material_status = gr.Textbox(label="下載結果", interactive=False)
         material_link = gr.Markdown(sanitize_html=True)
-        with gr.Accordion("恢復私人隱藏的作業", open=False):
-            hidden = gr.Dropdown(label="此課程已隱藏的作業", choices=[])
-            unhide = gr.Button("恢復顯示")
-            visibility_status = gr.Textbox(label="私人顯示設定", interactive=False)
         with gr.Accordion("校務與 Moodle 課程對應", open=False):
             gr.Markdown("課號、學期、課名完全一致才自動對應。有歧義時需人工確認；不同學期禁止配對。")
             mapping_table = gr.Dataframe(headers=["校務課號與學期", "課名", "對應狀態", "Moodle 課程 ID"], interactive=False)
@@ -279,9 +250,7 @@ def build_data_hub(service, ui):
 
     outputs = [connection, timetable, grades_table, rank_table, graduation_table,
                timetable_status, grades_status, rank_status, graduation_status, mapping_table, sis_course, course]
-    course_outputs = [course_status, contents, announcements, moodle_grades, material, original, hidden]
-    connect_button.click(connect, [sis_username, sis_password], [sis_status, sis_username, sis_password], api_name=False).then(refresh, outputs=outputs, api_name=False)
-    disconnect_button.click(hub.disconnect_sis, api_name=False).then(refresh, outputs=outputs, api_name=False)
+    course_outputs = [course_status, contents, announcements, moodle_grades, material, original]
     sis_sync.click(sync_sis, outputs=sis_status, api_name=False).then(refresh, outputs=outputs, api_name=False)
     refresh_button.click(refresh, outputs=outputs, api_name=False)
     discover_button.click(discover, semester, [selected, course, sync_status], api_name=False)
@@ -291,6 +260,5 @@ def build_data_hub(service, ui):
     material_download.click(download, [material, approved], [material_status, material_link, approved], api_name=False)
     sis_course.change(mapping_candidates, sis_course, moodle_course, api_name=False)
     confirm_button.click(confirm, [sis_course, moodle_course], mapping_status, api_name=False).then(refresh, outputs=outputs, api_name=False)
-    unhide.click(restore_hidden, hidden, visibility_status, api_name=False).then(course_view, course, course_outputs, api_name=False)
     ui.load(refresh, outputs=outputs, api_name=False)
     return refresh, outputs

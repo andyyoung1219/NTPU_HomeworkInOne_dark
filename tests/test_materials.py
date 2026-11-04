@@ -5,6 +5,7 @@ import zipfile
 import httpx
 import pymupdf
 import pytest
+from test_mvp import service as service
 from test_sis import transport
 
 from backend.integrations.materials import fetch_material, inspect_material
@@ -89,3 +90,36 @@ def test_compressed_http_responses_are_decoded_once():
     reader = transport(lambda request: httpx.Response(200, content=gzip.compress(b"decoded body"), headers={"content-encoding": "gzip"}))
     assert reader.request("GET", "https://my.ntpu.edu.tw/").content == b"decoded body"
     reader.close()
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "big5"])
+def test_attachment_only_assignment_with_chinese_download_header(service, monkeypatch, encoding):
+    from backend.p0 import moodle
+
+    assignment = service.get("assignment", "2")
+    assignment["description"] = ""
+    service.store.save(service.user, "assignment", "2", assignment)
+    asset = service.get("asset", "a" * 24)
+    data = service.safe_path(asset["path"]).read_bytes()
+    asset.update(name="課程作業規範.pdf", path=None, status="not_downloaded",
+                 source_url="https://lms3.ntpu.edu.tw/pluginfile.php/1/assignment.pdf",
+                 size_bytes=len(data))
+    service.store.save(service.user, "asset", asset["id"], asset)
+    disposition = 'attachment; filename="課程作業規範.pdf"'.encode(encoding)
+
+    def handler(request):
+        assert request.url.path == "/webservice/pluginfile.php/1/assignment.pdf"
+        return httpx.Response(200, content=data, headers=[
+            (b"content-type", b"application/pdf"), (b"content-disposition", disposition)])
+
+    monkeypatch.setattr(service, "verify_identity", lambda: None)
+    monkeypatch.setattr(service.moodle, "credentials", lambda: ("synthetic-token", set()))
+    validate_url = moodle.validate_url
+    monkeypatch.setattr(moodle, "validate_url", lambda url: validate_url(url, resolve=False))
+    service.moodle.client.transport.close()
+    service.moodle.client.transport = transport(handler)
+    parsed = service.download("2", [asset["id"]])
+    assert "Please submit a report" in parsed["excerpt"]
+    assert parsed["requirements"]
+    assert parsed["assets"][0]["status"] == "parsed"
+    assert service.safe_path(parsed["assets"][0]["path"]).read_bytes() == data

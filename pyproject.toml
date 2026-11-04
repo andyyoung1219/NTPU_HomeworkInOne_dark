@@ -1,7 +1,7 @@
 [project]
 name = "ntpu-homework-in-one-dark"
-version = "0.2.0"
-description = "Local SIS and Moodle learning data hub with reviewed AI drafts and PDF export"
+version = "0.3.0"
+description = "Local learning hub with approved tool agents, isolated analysis and reviewed PDF export"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -14,6 +14,8 @@ dependencies = [
   "lxml>=6.1.3,<7",
   "reportlab>=4.4,<5",
   "fonttools>=4.60,<5",
+  "langgraph>=1.0,<2",
+  "jsonschema>=4.23,<5",
 ]
 
 [dependency-groups]

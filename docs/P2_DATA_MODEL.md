@@ -4,12 +4,12 @@
 
 沿用 P1 `records(user_id, kind, id, payload, updated_at)`、`events` 與 schema version 1。
 新增 record kinds／JSON 欄位，不重建資料表；舊任務、附件及 PDF 可繼續開啟。
-缺少新欄位時用保守預設；私人隱藏 `hidden=false`，未知學期／課號為 null。
+缺少新欄位時用保守預設，未知學期／課號為 null。舊資料的 `hidden` 欄位不再影響作業清單。
 
 | kind | id | payload／用途 |
 | --- | --- | --- |
 | course | Moodle ID | 原 name/source，加 semester/code/shortname/idnumber/start_at/end_at/scope；scope 為 inprogress、inactive 或明確學期。 |
-| assignment | Moodle assignment ID | 加 hidden、removed；同步只改來源資料，保留私人隱藏。消失作業仍可用於歷史任務。 |
+| assignment | Moodle assignment ID | 以 removed 標記來源已消失的作業，仍可用於歷史任務。 |
 | hub | `sis:timetable/grades/rank/graduation` | 身份核對後的校務結構化快照。 |
 | hub | `moodle:{course_id}:assignments/contents/announcements/grades` | 每課程每來源分別同步，失敗只標該快照 stale/error。 |
 | material | SHA-256 的前 24 字元 | ID 由 Moodle course + module/discussion ID + 已驗證的檔案 URL 產生；教材與 P1 asset 分開，不能混入任務附件清單。 |

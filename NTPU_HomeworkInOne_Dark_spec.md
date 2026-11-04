@@ -890,10 +890,12 @@ ntpu-study-agent/
 
 ### Sprint 6 — P3 Tool Agent
 
-- [ ]  `S6-01` LangGraph Task Plan / Tool Registry / Approval。
-- [ ]  `S6-02` 新增 Skills：Data Analysis / Coding / Research。
-- [ ]  `S6-03` Sandboxed Runner / 圖表 / 可重現報告。
-- [ ]  `S6-04` Checkpoint / Retry / Cancel / Partial Output。
+- [x]  `S6-01` LangGraph Task Plan / Tool Registry / Approval（本機 SQLite 工具邊界檢查點）。
+- [x]  `S6-02` 新增 Skills：Data Analysis / Coding / Research / Reference Checker。
+- [x]  `S6-03` Sandboxed Runner / 圖表 / 可重現報告（實作與合成驗證完成；真實隔離 Gate 待 Docker 環境驗證）。
+- [x]  `S6-04` Checkpoint / Retry / Cancel / Partial Output。
+
+P3 Gate 狀態與限制：`docs/P3_VALIDATION.md`；真人 AI 與真實容器 Gate 尚不能宣告通過。
 
 ### Sprint 7 — P4 / P5 完整版
 
