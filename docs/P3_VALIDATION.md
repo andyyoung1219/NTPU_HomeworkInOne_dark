@@ -50,7 +50,7 @@ Runner 只有 Python 標準函式庫；程式可讀 `/input/<來源 SHA256>.<副
 - `backend/agent/contracts.py`：伺服器產生的 TaskPlan、JSON Schema 白名單、不可由模型增設的工具與分級權限。
 - `backend/agent/engine.py`：LangGraph 執行／驗證節點；SQLite task record 保存每步前後的持久檢查點。此版使用既有使用者分區 Store，沒有另外的 LangGraph saver DB。
 - 預設最多 24 次工具嘗試、每步 1 次重試、3 次外部請求、累計 60000 prompt 字元、單步 60 秒（工具介面預設 120 秒）、總期限 600 秒。所有限制跨 resume 累計。
-- 一般工具計畫中，`NETWORK_UNAVAILABLE` 與模型 JSON 格式錯誤可在額度內重試；不確定的 AI 逾時不自動重送。直接完成模式另依一次核准從 checkpoint 重試可恢復錯誤，連續三次失敗即停止，總期限 900 秒、AI／公開資料請求最多 18 次。兩者遇到 429／SSO／權限拒絕皆立即停止，不重開 Session 規避限制。
+- 一般工具計畫中，`NETWORK_UNAVAILABLE` 與模型 JSON 格式錯誤可在額度內重試；不確定的 AI 逾時不自動重送。直接完成模式另依一次核准從 checkpoint 重試可恢復錯誤，每步最多三次；非致命資料／執行失敗後以已有證據生成報告並列出使用者待辦，AI 無法生成時才停止。總期限 900 秒、AI／公開資料請求最多 18 次。兩者遇到 429／SSO／權限拒絕皆立即停止，不重開 Session 規避限制。
 - 日誌只保存輸入欄位名、hash、時間、結果 hash、產物 hash 與固定錯誤碼。原文及工具輸出留在本機任務資料／產物，不進事件日誌。
 - Skills 只是指引，不能授權工具。一般工具計畫不接受文件或模型改寫步驟；直接完成模式僅接受固定 schema 的成果規劃、程式碼與報告，由伺服器固定工具圖執行，不接受任意工具呼叫。
 - CSV 以完整已選資料計算 count、missing、mean、minimum、maximum、sample stdev；空值略過且計數，非數字／非有限值拒絕。主程式用固定實作獨立重算，完全一致才產生圖表。
@@ -81,7 +81,8 @@ Remove-Item Env:NTPU_TEST_RUNNER
 ```
 
 結果保存在 `.local/p3/validation.json`；真實 Runner 啟用時若無法啟動，不會跳過而偽裝通過。
-2026-11-04 完整回歸為 301 項通過、0 失敗、0 略過，JUnit 證據為 `.local/docker-validation-all.xml`。
+2026-11-04 初次 Docker 完整回歸為 301 項通過、0 失敗、0 略過，JUnit 證據為 `.local/docker-validation-all.xml`。
+使用者待辦政策的完整回歸為 357 項通過、0 失敗、0 略過，另有 34 項程式碼保留補強驗證通過；證據與範圍見 [P4 驗收](P4_VALIDATION.md)。
 一般回歸會明確 skip 真實容器測試。真人 P3 Gate 完成前不能將本文件標成「P3 Gate 全通過」。
 
 參考官方契約：[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、
