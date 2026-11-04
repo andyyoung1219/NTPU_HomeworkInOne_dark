@@ -108,7 +108,7 @@ def test_direct_completion_uses_real_container_evidence_before_review(service, r
     task = service.complete_assignment("2", "real-direct-completion")
     result = await_task(service, task["id"], timeout=30)
     assert result["status"] == "waiting_review", result.get("error")
-    assert result["completion"] == {"status": "complete", "blockers": []}
+    assert result["completion"] == {"status": "complete", "blockers": [], "required_actions": []}
     assert len(result["runs"]) == 1 and len(service.ai.calls) == 3
     assert result["checkpoint"]["cursor"] == len(result["plan"]["steps"])
     assert "The executed program verified" in result["draft"]
