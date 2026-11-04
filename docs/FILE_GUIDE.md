@@ -1,7 +1,34 @@
 # 專案檔案導覽：每個檔案在做什麼
 
-更新日期：2026-11-02。依目前實際程式整理，涵蓋專案原始碼、設定、文件、測試與引入的上游模組。
+更新日期：2026-11-04。依目前實際程式整理，涵蓋專案原始碼、設定、文件、測試與引入的上游模組。
 安裝套件與執行產物依類型列在最後，方便在 VS Code 檔案總管辨識。
+
+## 直接完成作業與恢復新增檔案（2026-11-04）
+
+| 檔案 | 用途 |
+| --- | --- |
+| `backend/agent/completion.py` | 直接完成作業的固定工具流程、來源快照、資料集／統計、隔離執行與成果報告 |
+| `skills/assignment-completer/SKILL.md` | 按題目語言產生具體成果，以真實證據區分提案、執行結果與阻塞事項 |
+| `tests/test_completion.py` | 直接完成的核准、來源、公開資料、API 與阻塞結果 |
+| `tests/test_completion_format.py` | 成果報告格式、語言、來源標籤與未完成內容判定 |
+| `tests/test_completion_retries.py` | checkpoint 續跑、連續三次失敗、成功後歸零與立即停止條件 |
+| `tests/test_completion_ui.py` | 一鍵入口、執行進度與自動前往審閱頁 |
+| `tests/test_generation_recovery.py` | AI 連線恢復、重新生成、獨立逾時與續跑預算 |
+| `tests/test_export_recovery.py` | PDF 品質失敗的可用格式保留、來源快照相容性與 ZIP hash 驗證 |
+| `tests/test_prepare_live.py` | 真人準備腳本的首門課／首份作業選取及空資料處理 |
+| `tests/test_runner_config.py` | Docker CLI 尋找、保存 context 與舊設定相容 |
+
+原有 `tests/test_p3_sandbox.py` 另包含直接完成模式的真實容器執行；所有 AI 回覆使用合成資料。
+
+## P4 新增檔案（2026-11-04）
+
+| 檔案 | 用途 |
+| --- | --- |
+| `backend/services/learning.py` | 儀表板、課程彙整、FTS5 搜尋與本機五步驟進度 |
+| `backend/services/exports.py` | DOCX 產生、ZIP 明確清單打包、雜湊與審閱檢查 |
+| `frontend/learning.py` | 首頁總覽、課程專頁、搜尋結果與來源連結 |
+| `tests/test_p4.py` | 搜尋／課程／帳號隔離、恢復與匯出回歸 |
+| `docs/P4_VALIDATION.md` | 本次選定範圍、資料遷移、驗收與限制 |
 
 ## P3 新增檔案（2026-11-03）
 
@@ -12,7 +39,7 @@
 | `backend/agent/runner.py` | Docker CLI 隔離執行、限制輸出、逾時清理；不在宿主機執行 Python 輸入 |
 | `runner/Dockerfile`、`runner/supervisor.py` | 最小標準函式庫映像與容器內輸出收集 |
 | `frontend/agent_tools.py` | 工具計畫預覽、分級核准、教材與 CSV 選取、執行紀錄和續跑 |
-| `scripts/setup_runner.py` | 明確建置 Runner，保存不可變 image ID |
+| `scripts/setup_runner.py` | 選擇 Docker Linux context、建置並實際檢查 Runner，成功後保存不可變 image ID 與 context |
 | `scripts/validate_p3.py` | 執行合成或真實 Runner gate，保存每案例成功／失敗原因 |
 | `tests/test_p3.py`、`tests/test_p3_sandbox.py` | 合成流程與真實 Docker 隔離測試分離 |
 | `skills/{academic-research,coding-assistant,data-analysis,reference-checker}/SKILL.md` | 操作指引與證據要求，不能授權工具 |
@@ -113,7 +140,9 @@ flowchart TD
 | 檔案 | 用途 |
 | --- | --- |
 | [frontend/__init__.py](../frontend/__init__.py) | `frontend` 的空 Python 套件標記。 |
-| [frontend/gradio_app.py](../frontend/gradio_app.py) | 用 Gradio 建立「我的作業」「AI 草稿工作區」「審閱與匯出」「連線管理」。包含按鈕 callback、狀態文字、CSS、草稿預覽、歷史恢復與本次核准的清除規則。 |
+| [frontend/gradio_app.py](../frontend/gradio_app.py) | Gradio 首頁、五步驟獨立畫面、直接完成作業、連線管理、草稿預覽與匯出；包含 callback、CSS、進度恢復與核准清除規則。 |
+| [frontend/connections.py](../frontend/connections.py) | 連線管理彈窗、登入狀態檢查與 Moodle／校務／AI 登入交接。 |
+| [frontend/navigation.py](../frontend/navigation.py) | 首頁與各步驟的切換、步驟提示與直接完成模式導覽。 |
 
 要改按鈕名稱、欄位順序、預設需求、配色或錯誤提示，先看 `frontend/gradio_app.py`。
 要改按下按鈕後的同步、核准或匯出規則，接著看 `backend/services/study.py`。
@@ -156,7 +185,7 @@ flowchart TD
 | [scripts/check_repository.py](../scripts/check_repository.py) | Git 內容的基本私人檔案與秘密掃描。 | 檢查已追蹤及可加入 Git 的檔案，拒絕個人產物／資料目錄與明顯的長字串憑證賦值；不是完整的資安稽核器。 |
 | [scripts/p0_status.py](../scripts/p0_status.py) | 查詢 P0 Gate。 | 讀本機去識別化證據，印出各項是否通過。 |
 | [scripts/live_status.py](../scripts/live_status.py) | 查詢本機任務狀態。 | 讀 SQLite，僅輸出任務編號、狀態、錯誤、審閱與 QA 欄位，不輸出草稿全文。 |
-| [scripts/prepare_live.py](../scripts/prepare_live.py) | 指定課程的真人驗收輔助腳本。 | 透過已啟動 MVP 的 API 與本機解鎖網址，恢復本人 Moodle、同步並下載「人工智慧代理人原理及實務／指定作業1」附件；課名與作業名寫在腳本內，並非通用同步入口，也不會送 AI。 |
+| [scripts/prepare_live.py](../scripts/prepare_live.py) | 本人課程的真人驗收輔助腳本。 | 透過已啟動 MVP 的 API 與本機解鎖網址，恢復目前登入者的 Moodle，選取回傳的第一門課程及該課程第一份作業並下載附件。沒有課程或作業時對應欄位留空；無附件時節錄與要求留空，仍覆寫準備結果，不保留舊選取。不會送 AI。 |
 | [scripts/qa_live_pdf.py](../scripts/qa_live_pdf.py) | 最近一份已完成 PDF 的視覺 QA 準備。 | 從 SQLite 找到已完成任務，渲染每頁 PNG 到 `.local/qa/pdf/`，並輸出 PDF 檢查結果。實際版面仍需看渲染圖確認。 |
 
 平常執行產品使用 `run_mvp.ps1`；修改安裝環境看 `setup_dev.ps1`。
@@ -167,7 +196,7 @@ flowchart TD
 | 檔案 | 用途 | 目前接線方式 |
 | --- | --- | --- |
 | [skills/assignment-reader/SKILL.md](../skills/assignment-reader/SKILL.md) | 說明如何依題目節錄整理需求、保留 file_id／頁碼及標示缺漏。 | StudyService 組合 AI 請求時會讀入內容。 |
-| [skills/report-writer/SKILL.md](../skills/report-writer/SKILL.md) | 規範繁體中文草稿、結構化 JSON、來源與 TODO，不編造實驗結果。 | StudyService 組合 AI 請求時會讀入內容。 |
+| [skills/report-writer/SKILL.md](../skills/report-writer/SKILL.md) | 依題目指定語言產生草稿，未指定時使用繁體中文；規範結構化 JSON、來源與 TODO，不編造實驗結果。 | StudyService 組合 AI 請求時會讀入內容。 |
 | [skills/pdf-generator/SKILL.md](../skills/pdf-generator/SKILL.md) | 記錄人工審閱後的本機 PDF 渲染與驗證流程。 | 目前是流程規範文件；實際執行邏輯寫在 reports.py，沒有動態 Skill 執行器。 |
 
 ## 11. 測試檔案
@@ -220,6 +249,7 @@ flowchart TD
 | `.local/app/study.sqlite3-wal`、`.local/app/study.sqlite3-shm` | SQLite 執行期間使用的交易／共享記憶體輔助檔。 |
 | `.local/app/active-user.json` | 最近使用的本機使用者雜湊識別，供重新啟動時選對資料分區；不是 Moodle Token。 |
 | `.local/app/launch-url.txt` | 當次啟動的本機解鎖網址，每次啟動換發。 |
+| `.local/app/runner.json` | 本機 Docker 不可變映像 ID 與 context，只有 Runner 建置與實際執行檢查成功才保存。 |
 | `.local/app/incoming/` | 下載器初步保存並檢查的附件，以 hash 命名。 |
 | `.local/app/assets/<user_hash>/` | 依本人帳號分區保存的附件原檔。 |
 | `.local/app/prepared-live.json` | prepare_live.py 準備的驗收資料，含選定來源與文件節錄。 |
@@ -247,6 +277,8 @@ NTPU AI 專用 Profile 目前位於 `%LOCALAPPDATA%/NTPU HomeworkInOne/p0/browse
 | PDF／Word／CSV 解析 | documents.py → p0/moodle.py 的 inspect_document → tests/test_mvp.py、tests/test_p0.py |
 | Moodle 登入、Token、下載限制 | p0/moodle.py → study.py 的同步／下載流程 |
 | AI 要怎麼回答、草稿格式 | skills/assignment-reader、skills/report-writer → study.py 的 _run、format_result |
+| 直接完成作業、公開資料與自動重試 | skills/assignment-completer → agent/completion.py → agent/engine.py → tests/test_completion*.py |
+| Docker context、隔離與 Windows 長路徑 | agent/runner.py → scripts/setup_runner.py → tests/test_runner_config.py、tests/test_p3_sandbox.py |
 | AI 連線、取消、逾時 | p0/ai.py → ntpu-ai-bridge/src/p0.cjs → vendor/src/browser.js |
 | 核准規則、來源快照、重複請求 | study.py 的 create_task、approve |
 | 資料保存、歷史任務 | models/store.py → study.py → frontend/gradio_app.py |
