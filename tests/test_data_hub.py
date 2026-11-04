@@ -312,7 +312,7 @@ def test_hub_api_auth_approval_and_secret_validation(hub_service):
     with TestClient(create_app(service, key="synthetic-session"), base_url=ORIGIN) as client:
         assert client.get("/api/hub").status_code == 401
         client.get("/unlock/synthetic-session")
-        assert client.get("/health").json()["phase"] == "P3"
+        assert client.get("/health").json()["phase"] == "P4"
         assert client.post("/api/sync/moodle/full", json={"course_ids": []}).status_code == 422
         assert client.post("/api/sync/moodle/full", json={"course_ids": ["1", "2"]}).status_code == 200
         assert client.get("/api/hub/courses/1").json()["data"]["grades"]["source"] == "moodle"
