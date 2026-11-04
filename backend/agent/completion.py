@@ -40,9 +40,55 @@ DATASETS = {
 }
 INSTRUCTION = (
     "直接完成本次作業。自行選擇符合題目的合理方法、主題與允許資料，完成所需計算與程式，"
-    "交付具體成果報告，不交付待填範本或告訴學生應該做什麼。依題目指定語言撰寫，未指定使用繁體中文。"
+    "先完成所有可完成的具體成果，非致命缺漏不阻擋生成；報告末尾另列使用者需要完成的具體事情。"
+    "不以待填範本取代可完成的正文。依題目指定語言撰寫，未指定使用繁體中文。"
     "提案作業要完成提案與真實資料描述，不把未來計畫捏造成已完成實驗。"
+    "系統會在本人審閱後以本機工具匯出 PDF、DOCX、Markdown 或 ZIP，模型不需自行轉檔。"
+    "上傳 E-learning/Moodle、命名下載檔與截止前提交由本人在審閱匯出後操作，"
+    "題目要求的這些交付操作應列入 required_actions，不可因此停止撰寫。"
+    "學號或姓名若僅用於檔名、封面或署名且來源未提供，省略該欄並繼續完成正文，"
+    "不得猜測或留下 studentID 等佔位內容，並在 required_actions 列出補上身份或改檔名的事情。"
+    "缺少解題資料時先完成可用部分，明示哪些結果無法取得，將補資料或執行的事情列入 required_actions。"
 )
+APPLICATION_CAPABILITIES = {
+    "reviewed_local_exports": ["pdf", "docx", "markdown", "zip"],
+    "export_requires_human_review": True,
+    "automatic_submission": False,
+    "submission_and_final_filename": "Handled by the user after review and export; not report-content blockers.",
+    "missing_byline_or_filename_identity": "Omit unknown identity fields and add a user action; do not invent identity or block report content.",
+}
+
+
+def add_actions(task, actions):
+    pending = task.setdefault("required_actions", [])
+    for action in actions:
+        if action and action not in pending:
+            pending.append(action)
+
+
+def fallback(engine, user, task, tool, code):
+    """Keep optional tool failures as evidence; never bypass source/auth checks."""
+    allowed = {
+        "gather_completion_data": {"NETWORK_UNAVAILABLE", "TOOL_TIMEOUT", "OPERATION_TIMEOUT",
+            "DATASET_UNAVAILABLE", "RESEARCH_UNAVAILABLE", "DATASET_EMPTY", "DATASET_SCHEMA_INVALID",
+            "DATASET_TOO_LARGE"},
+        "execute_completion": {"SANDBOX_NOT_AVAILABLE", "PYTHON_EXECUTION_FAILED", "TOOL_TIMEOUT",
+            "AI_TIMEOUT", "OPERATION_TIMEOUT", "AI_INVALID_COMPLETION_PLAN", "AI_INVALID_REPORT_SCHEMA",
+            "SANDBOX_EXECUTION_FAILED", "RUNNER_OUTPUT_LIMIT", "RUNNER_RESULT_INVALID"},
+    }
+    if code not in allowed.get(tool, set()):
+        return None
+    engine.check(user, task)
+    if tool == "gather_completion_data":
+        action = "Obtain or check the unavailable dataset/references and complete the affected analysis; do not treat missing data as measured results."
+        result = task.setdefault("completion_data", {"datasets": [], "research": {}})
+    else:
+        action = "Run and verify the supplied program or experiment in a suitable environment, then add the actual results; execution has not been verified."
+        result = {"execution_required": True, "execution_verified": False}
+    add_actions(task, [action])
+    task.setdefault("completion_issues", []).append({"tool": tool, "code": code})
+    engine.save(user, task)
+    return {**result, "degraded": True, "error_code": code}
 
 
 class CompletionPlan(BaseModel):
@@ -159,6 +205,7 @@ def ask(engine, user, task, instruction, payload):
 
 
 def prepare(engine, user, task):
+    from backend.services.study import error_code
     study = engine.study
     current = study.get("assignment", task["assignment_id"])
     saved = task["assignment_snapshot"]
@@ -168,14 +215,38 @@ def prepare(engine, user, task):
         asset = study.get("asset", snapshot["id"])
         if any(asset.get(key) != value for key, value in snapshot.items()):
             fail("ASSET_CHANGED")
-    refs = task["request"]["selected_asset_ids"]
-    parsed = study.download(task["assignment_id"], refs) if refs else study.parse_assignment(task["assignment_id"], [])
+    refs = []
+    for ref in task["request"]["selected_asset_ids"]:
+        asset = study.get("asset", ref)
+        try:
+            study.download(task["assignment_id"], [ref])
+            downloaded = study.get("asset", ref)
+            if study.safe_path(downloaded["path"]).stat().st_size > 10_000_000:
+                fail("INPUT_SIZE_INVALID")
+            refs.append(ref)
+        except Exception as exc:
+            code = error_code(exc)
+            if code == "attachment_http_error" and getattr(exc, "status", None) in {401, 403, 429}:
+                fail({401: "AUTH_REQUIRED", 403: "PERMISSION_DENIED", 429: "RATE_LIMITED"}[exc.status])
+            if code not in {"UNSUPPORTED_FORMAT", "pdf_requires_ocr", "pdf_protected_or_too_large",
+                            "text_invalid_or_too_large", "csv_too_many_columns", "attachment_too_large",
+                            "NETWORK_UNAVAILABLE", "OPERATION_TIMEOUT", "attachment_http_error", "INPUT_SIZE_INVALID"}:
+                raise
+            add_actions(task, [f"Read or convert the unreadable attachment {asset['name']} and add any missing requirements or evidence."])
+            task.setdefault("completion_issues", []).append({"tool": "prepare_completion", "code": code})
+        engine.check(user, task)
+    parsed = study.parse_assignment(task["assignment_id"], refs)
     engine.check(user, task)
+    if not current.get("description", "").strip() and not any(
+            chunk.get("text", "").strip() for asset in parsed["assets"] for chunk in asset.get("chunks", [])):
+        fail("ASSIGNMENT_TEXT_NOT_AVAILABLE")
     if parsed["truncated"]:
-        fail("ASSIGNMENT_EXCERPT_TOO_LARGE")
+        add_actions(task, ["Check the source sections beyond the extracted text limit and add any omitted requirements."])
     workspace = study.workspace(user, task["id"])
     for asset in parsed["assets"]:
         content = study.safe_path(asset["path"]).read_bytes()
+        if hashlib.sha256(content).hexdigest() != asset["sha256"]:
+            fail("ASSET_CHANGED")
         if len(content) > 10_000_000:
             fail("INPUT_SIZE_INVALID")
         target = workspace / "input" / (asset["sha256"] + Path(asset["name"]).suffix.lower())
@@ -197,20 +268,22 @@ def prepare(engine, user, task):
 
 
 def plan(engine, user, task):
-    if task.get("completion_plan") and not task["completion_plan"]["blockers"]:
+    if task.get("completion_plan") and task.get("completion", {}).get("status") != "blocked":
         return task["completion_plan"]
     payload = {"assignment": task["title"], "instruction": INSTRUCTION,
                "inputs": task["completion_inputs"], "dataset_catalog": DATASETS,
+               "application_capabilities": APPLICATION_CAPABILITIES,
                "sandbox": "Python standard library only; no network or package installation"}
     instruction = (
-        "規劃並自主決定本次作業的具體成果。回覆 "
+        INSTRUCTION + "規劃並自主決定本次作業的具體成果。回覆 "
         '{"objective":"具體主題與方法","deliverable_type":"proposal|report|code",'
         '"dataset_id":"wine-red|wine-white 或 null","needs_execution":false,'
         '"research_query":"可選公開主題","blockers":[]}。'
         "research_query 只能是空字串或 wine quality、data mining、machine learning、algorithms、"
         "software engineering、statistics、literature review 其中之一。"
         "題目允許自行選資料時，優先用作業附件；需要公開資料才選適用的目錄資料集。"
-        "題目指定其他資料集時不能偷換成目錄資料。缺少必要私人資料或工具不支援時列出精確 blockers。"
+        "題目指定其他資料集時不能偷換成目錄資料。缺少私人資料或工具不支援時列出精確 blockers，"
+        "這些會成為使用者待辦，仍須規劃並完成其他可完成部分。"
         "提案要完成主題與方法決策，資料筆數/欄位/統計由下一個工具實算，無須假裝已完成未來研究。"
         "只要需要驗證程式或完成實驗，就 needs_execution=true。不要因需要做選擇而丟給使用者。"
     )
@@ -223,8 +296,8 @@ def plan(engine, user, task):
         result["needs_execution"] = True
     task["completion_plan"] = result
     if result["blockers"]:
-        task["completion"] = {"status": "blocked", "blockers": result["blockers"]}
-        fail("COMPLETION_INPUT_REQUIRED")
+        add_actions(task, result["blockers"])
+    task["completion"] = {"status": "running", "blockers": []}
     return result
 
 
@@ -322,8 +395,6 @@ def gather(engine, user, task):
 def execute(engine, user, task):
     if not task["completion_plan"]["needs_execution"]:
         return {"execution_required": False, "reason": "The planned deliverable uses source evidence and computed dataset profiles."}
-    if not engine.runner.status()["available"]:
-        fail("SANDBOX_NOT_AVAILABLE")
     state = task.setdefault("completion_execution", {})
     if state.get("result"):
         result = state["result"]
@@ -336,6 +407,7 @@ def execute(engine, user, task):
                 fail("ASSET_CHANGED")
         return state["result"]
     payload = {"assignment": task["title"], "inputs": task["completion_inputs"],
+               "application_capabilities": APPLICATION_CAPABILITIES,
                "plan": task["completion_plan"], "data": task["completion_data"],
                "previous_failure": state.get("failure"), "previous_code": state.get("code"),
                "input_files": [{"name": a["name"], "path": "/input/" + a["sha256"] + Path(a["name"]).suffix.lower()}
@@ -351,10 +423,11 @@ def execute(engine, user, task):
     code = response.get("code")
     if not isinstance(code, str) or not code.strip() or len(code) > 20000:
         fail("AI_INVALID_COMPLETION_PLAN")
+    code = code.replace("\r\n", "\n").replace("\r", "\n")
     state["code"] = code
     work = engine.study.workspace(user, task["id"]) / "work"
     work.mkdir(parents=True, exist_ok=True)
-    (work / "analysis.py").write_text(code, encoding="utf-8")
+    (work / "analysis.py").write_text(code, encoding="utf-8", newline="")
     engine.save(user, task)
     inputs = engine.inputs(user, task)
     for dataset in task["completion_data"]["datasets"]:
@@ -362,6 +435,8 @@ def execute(engine, user, task):
         if hashlib.sha256(content).hexdigest() != dataset["sha256"]:
             fail("ASSET_CHANGED")
         inputs[dataset["sha256"] + ".csv"] = content
+    if not engine.runner.status()["available"]:
+        fail("SANDBOX_NOT_AVAILABLE")
     result = engine.runner.run(code, inputs, work / "runs", engine.study.active_jobs[task["id"]]["cancel"],
                                min(task["plan"]["limits"]["tool_timeout"], task["deadline_at"] - time.time()))
     for artifact in result["artifacts"].values():
@@ -372,6 +447,7 @@ def execute(engine, user, task):
         engine.save(user, task)
         fail("PYTHON_EXECUTION_FAILED")
     state["result"] = result
+    state.pop("failure", None)
     task.setdefault("generated_files", {})["analysis.py"] = {
         "path": str((work / "analysis.py").relative_to(engine.study.root)),
         "sha256": hashlib.sha256(code.encode()).hexdigest()}
@@ -384,35 +460,61 @@ def report(engine, user, task):
     guidance = "\n".join((ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8") for name in skills)
     instruction = (
         INSTRUCTION + "依下方 skill 與證據撰寫可審閱的完成報告，從頭到尾完成題目要求的具體內容。"
-        "不要輸出待填骨架、給學生的操作建議、Draft Notes 或繳交清單。回覆 "
+        "正文直接呈現已完成內容，不輸出待填骨架；尚需本人處理的事情另放 required_actions，"
+        "由系統附在報告末尾。將所有 required_actions 翻成題目要求的語言，明確說明要補什麼及原因。回覆 "
         '{"title":"成果標題","sections":[{"heading":"章節","content":"完整 Markdown 內容"}],'
-        '"sources":["實際用到的 file_id"],"unresolved":[],"report_labels":{"sources_heading":"依報告語言的來源標題"},'
-        '"completion":{"status":"complete 或 blocked","blockers":[]}}。'
-        "缺少必要事實就明確 blocked，不能用 TODO 假裝完成；所有統計、模型結果與測試宣稱需對應實際證據。"
+        '"sources":["實際用到的 file_id"],"unresolved":[],"report_labels":{"sources_heading":"依報告語言的來源標題",'
+        '"actions_heading":"依報告語言的使用者待辦標題"},'
+        '"completion":{"status":"complete 或 needs_action","blockers":[],"required_actions":[],"action_resolutions":{}}}。'
+        "缺少事實或執行證據時先完成可證實部分，說明缺漏並列 required_actions，不能用 TODO 假裝完成；"
+        "所有統計、模型結果與測試宣稱需對應實際證據。不得省略傳入的待辦，可合併重複並翻譯。"
+        "pending_actions 中的每個 action ID，都要在 completion.action_resolutions 回覆其依題目語言翻譯的具體待辦文字。"
         "公開完整資料集 URL 可供讀者下載查核；不能宣稱已上傳私人雲端。提案的未來工作清楚標為計畫。"
         "必要時在正文包含完成的原始碼 fenced code blocks。\n" + guidance
     )
     payload = {"assignment": task["title"], "inputs": task["completion_inputs"],
                "plan": task["completion_plan"], "data": task["completion_data"],
                "execution": task.get("completion_execution", {}).get("result"),
+               "generated_program": task.get("completion_execution", {}).get("code"),
+               "execution_failure": task.get("completion_execution", {}).get("failure"),
+               "application_capabilities": APPLICATION_CAPABILITIES,
+               "required_actions": task.get("required_actions", []),
+               "pending_actions": {f"action-{index + 1}": action for index, action in enumerate(task.get("required_actions", []))},
+               "tool_issues": task.get("completion_issues", []),
                "allowed_sources": task["source_names"], "previous_blockers": task.get("completion", {}).get("blockers", [])}
     model = ask(engine, user, task, instruction, payload)
+    # Validate the model contract before using its action lists or sections.
     draft, model = engine.study.format_result(json.dumps(model, ensure_ascii=False), task)
-    task.update(draft=draft, report_model=model, skills=skills)
-    completion = model.get("completion", {"status": "blocked", "blockers": ["Missing completion assessment"]})
-    blockers = list(completion["blockers"]) + list(model["unresolved"])
-    if re.search(r"\bTODO\b|\bTBD\b|待填|請自行|由學生完成", draft, re.I):
-        blockers.append("REPORT_CONTAINS_PLACEHOLDERS")
+    body = "\n".join(section["content"] for section in model["sections"])
+    marker = re.search(r"\bTODO\b|\bTBD\b|待填", body, re.I)
+    placeholder_only = re.fullmatch(
+        r"(?:(?:[^:\n.。;；]{0,80}[:：]\s*)?(?:TODO|TBD|待填)[\s.。;；]*)+", body.strip(), re.I)
+    if not body.strip() or placeholder_only:
+        task.update(draft=draft, report_model=model, skills=skills)
+        task["completion"] = {"status": "blocked", "blockers": ["REPORT_CONTAINS_PLACEHOLDERS"]}
+        fail("COMPLETION_INCOMPLETE")
+    assessment = model.get("completion", {})
+    actions = list(assessment.get("required_actions", [])) + list(assessment.get("blockers", [])) + list(model["unresolved"])
+    if marker:
+        actions.append("補完正文中標示待填的內容，確認缺漏已補齊再提交。" if re.search(r"[\u3400-\u9fff]", body)
+                       else "Complete the content marked TODO/TBD in the report and verify it before submission.")
+    resolutions = assessment.get("action_resolutions", {})
+    actions += [resolutions.get(f"action-{index + 1}", action)
+                for index, action in enumerate(task.get("required_actions", []))]
     if task["completion_plan"]["needs_execution"] and not task.get("completion_execution", {}).get("result"):
-        blockers.append("EXECUTION_EVIDENCE_REQUIRED")
+        if not any(issue["tool"] == "execute_completion" for issue in task.get("completion_issues", [])):
+            actions.append("Run the program or experiment and add verified results; no successful execution evidence is available.")
     for dataset in task["completion_data"]["datasets"]:
         if dataset["file_id"] not in model["sources"]:
-            blockers.append("DATASET_CITATION_REQUIRED")
-    task["completion"] = {"status": "complete" if completion["status"] == "complete" and not blockers else "blocked",
-                          "blockers": sorted(set(blockers))}
-    task["blockers"] = task["completion"]["blockers"]
+            actions.append("Add the dataset citation: " + dataset["title"] + " — " + dataset["url"])
+    actions = list(dict.fromkeys(actions))
+    model["completion"] = {"status": "needs_action" if actions else "complete", "blockers": [],
+                           "required_actions": actions}
+    model["unresolved"] = []
+    draft, model = engine.study.format_result(json.dumps(model, ensure_ascii=False), task)
+    task.update(draft=draft, report_model=model, skills=skills)
+    task["completion"] = model["completion"]
+    task["blockers"] = actions
     engine.study.write_draft(user, task)
     engine.save(user, task)
-    if task["completion"]["status"] != "complete":
-        fail("COMPLETION_INCOMPLETE")
     return {"sources": model["sources"], "unresolved": model["unresolved"], "skills": skills}
