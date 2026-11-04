@@ -55,17 +55,20 @@ P3 的 code execution/external research 需要獨立核准，詳見下節。
 
 流程為讀題與來源快照、成果規劃、資料取得與統計、必要的隔離執行、完成報告。
 `TOOL_TIMEOUT` 等可重試錯誤從失敗的 checkpoint 續跑，保留已完成的步驟與產物。
-連續失敗三次停止，成功一步後計數歸零；取消、身分驗證、權限、流量限制與預算／期限錯誤立即停止。
+同一步驟最多嘗試三次，成功一步後計數歸零。非致命的資料取得／執行工具失敗後，保留已得資料並繼續生成報告；AI 無法生成時停止。
+完全無題目文字、來源 hash／路徑驗證失敗、取消、身分驗證、權限、流量限制與預算／期限錯誤仍會停止。
 伺服器設定總期限 900 秒、AI 與公開資料請求合計預算 18 次，重試不重設這些限制；Moodle 題目與附件讀取不計入此請求額度。
 
-任務回覆包含 `completion.status`（running、complete 或 blocked）、`completion.blockers` 與
-`checkpoint.consecutive_errors`。成功後狀態為 `waiting_review`，由前端自動開啟審閱頁。
-必要條件缺失或成果仍含待填內容時保留已有結果並回報具體 blockers，經核准審閱才可使用既有匯出 API。
+任務回覆包含 `completion.status`（running、complete、needs_action 或 blocked）、`completion.required_actions`、`completion.blockers` 與
+`checkpoint.consecutive_errors`。有可用成果時任務狀態為 `waiting_review`，由前端自動開啟審閱頁。
+非致命缺漏與使用者操作存入 `completion.required_actions`，並依報告語言附在正文末尾；狀態為 `needs_action`。
+`completion.blockers` 用於真正無法繼續生成的停止原因。舊模型回覆的 blockers／unresolved 若屬待辦，會保留內容並轉入使用者待辦，不因有待辦而反覆重試整份報告。
+`task.blockers` 仍保存待處理項目作為匯出接受門檻；有待辦時須以 `reviewed=true`、`accept_incomplete=true` 保存草稿，才可使用既有匯出 API。
 成果提供具體解答、設計或分析，並依題目指定語言撰寫；提案與已執行實驗分別以相應證據敘述。
 
 目前資料能力為本次作業附件、UCI Wine Quality 紅／白酒資料集目錄，以及固定公開主題的 Crossref metadata。
 CSV 統計由本機固定程式計算；必要的模型產生程式只在 Docker 內以 Python 標準函式庫執行。
-需要其他資料、全文內容、本人資訊或目前不可用工具時，回報阻塞事項供審閱處理。
+需要其他資料、全文內容、本人資訊或目前不可用工具時，先完成可生成部分，再列出具體補做事項與證據限制；不得編造缺失資料或未執行的結果。
 
 ## P3 工具任務
 
