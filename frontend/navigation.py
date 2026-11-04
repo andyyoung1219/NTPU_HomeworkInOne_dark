@@ -25,6 +25,10 @@ def step_heading(index, title, description):
 
 
 CSS = """
+.dashboard-stats {display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px;margin:10px 0 20px}
+.dashboard-stats > div {padding:18px;border:1px solid #2c4350;border-radius:14px;background:#14232d}
+.dashboard-stats span {display:block;color:#a4b7c5;font-size:13px}
+.dashboard-stats strong {display:block;color:#79e0bf;font-size:30px;margin-top:8px}
 .gradio-container {max-width:1180px!important;margin:auto!important;padding:24px!important}
 body, .gradio-container {background:#0b1219!important}
 #app-bar {align-items:center;border-bottom:1px solid #263642;padding-bottom:18px;margin-bottom:24px}
