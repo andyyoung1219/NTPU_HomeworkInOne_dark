@@ -5,7 +5,7 @@
 
 更新：2026-11-03。實作已包含 Sprint 6 的四個項目；**不將合成驗收當作真實沙箱或真人 AI Gate 通過**。
 
-本次最終回歸：**175 passed、18 skipped**（31.27 秒）。18 項 skip 全部是明確 opt-in 的真實 Docker 測試。
+2026-11-03 階段回歸：**175 passed、18 skipped**（31.27 秒）。當時 18 項 skip 全部是明確 opt-in 的真實 Docker 測試；2026-11-04 最新完整回歸與真實隔離證據見下方「驗收分層」。
 五類代表任務各三次合成測試為 **15/15（100%）**，包含在 P3 的 41 項功能測試內。
 Ruff、Python 編譯、repository privacy check、uv lock 一致性皆通過；Python 全環境 pip-audit 未發現已知漏洞。
 完整 JUnit 本機證據：`.local/p3-final.xml`；不包含真實學校資料。
@@ -22,7 +22,7 @@ Ruff、Python 編譯、repository privacy check、uv lock 一致性皆通過；P
 
 ## 啟用 Runner
 
-需要可用的 Docker **Linux containers**，可由 Docker Desktop 提供。本次環境沒有 Docker，因此本機真實隔離 Gate 未執行。
+需要可用的 Docker **Linux containers**，Windows 使用已啟動的 Docker Desktop／WSL 2 後端。2026-11-04 已完成本機真實隔離測試；Docker 同時是程式執行的 runtime，不只是測試工具。
 
 ```powershell
 # 在已安裝且啟動 Docker 後，明確下載基底並建立 Runner：
@@ -34,7 +34,8 @@ $env:NTPU_TEST_RUNNER = '1'
 Remove-Item Env:NTPU_TEST_RUNNER
 ```
 
-建置使用官方 `python:3.12-slim`；完成後將實際不可變 image ID 寫入 `.local/app/runner.json`。
+建置使用官方 `docker.io/library/python:3.12-slim`；優先選用 `desktop-linux` context，實際執行非 root smoke test 成功後，才將不可變 image ID 與 context 寫入 `.local/app/runner.json`。
+Windows 會尋找常見 Docker Desktop 安裝路徑；目前不支援缺少必要 tmpfs inode 限制的 Podman 相容引擎。啟動與疑難排解見 [README](../README.md#準備程式執行環境docker)。
 執行只接受 `sha256:...` ID，使用 `--pull=never`，不在任務執行期間安裝套件或下載映像。
 Runner 只有 Python 標準函式庫；程式可讀 `/input/<來源 SHA256>.<副檔名>`，寫入 `/output/`。
 安全限制由容器設定實施，不能用 Python import 黑名單替代隔離。不存在宿主機執行 fallback。
@@ -49,9 +50,9 @@ Runner 只有 Python 標準函式庫；程式可讀 `/input/<來源 SHA256>.<副
 - `backend/agent/contracts.py`：伺服器產生的 TaskPlan、JSON Schema 白名單、不可由模型增設的工具與分級權限。
 - `backend/agent/engine.py`：LangGraph 執行／驗證節點；SQLite task record 保存每步前後的持久檢查點。此版使用既有使用者分區 Store，沒有另外的 LangGraph saver DB。
 - 預設最多 24 次工具嘗試、每步 1 次重試、3 次外部請求、累計 60000 prompt 字元、單步 60 秒（工具介面預設 120 秒）、總期限 600 秒。所有限制跨 resume 累計。
-- `NETWORK_UNAVAILABLE` 與模型 JSON 格式錯誤可在額度內重試。429／SSO／權限拒絕及不確定的 AI 逾時不自動重送，不重開 Session 規避限制。
+- 一般工具計畫中，`NETWORK_UNAVAILABLE` 與模型 JSON 格式錯誤可在額度內重試；不確定的 AI 逾時不自動重送。直接完成模式另依一次核准從 checkpoint 重試可恢復錯誤，連續三次失敗即停止，總期限 900 秒、AI／公開資料請求最多 18 次。兩者遇到 429／SSO／權限拒絕皆立即停止，不重開 Session 規避限制。
 - 日誌只保存輸入欄位名、hash、時間、結果 hash、產物 hash 與固定錯誤碼。原文及工具輸出留在本機任務資料／產物，不進事件日誌。
-- Skills 只是指引，不能授權工具。文件、模型回覆及工具結果都不能修改計畫；模型只產生草稿，不回傳任意工具呼叫。
+- Skills 只是指引，不能授權工具。一般工具計畫不接受文件或模型改寫步驟；直接完成模式僅接受固定 schema 的成果規劃、程式碼與報告，由伺服器固定工具圖執行，不接受任意工具呼叫。
 - CSV 以完整已選資料計算 count、missing、mean、minimum、maximum、sample stdev；空值略過且計數，非數字／非有限值拒絕。主程式用固定實作獨立重算，完全一致才產生圖表。
 - 程式退出碼 0 只證明該程式成功結束，不自動證明作業正確。rubric 的語意覆蓋仍需本人核對。
 - PDF 只載入 hash 驗證過、由程式固定生成的圖表，不依 Markdown 讀外部 URL 或任意本機檔案。manifest v2 包含計畫、核准來源、工具紀錄、run_id、程式／輸入 hash、執行參數、映像與套件版本、缺漏接受紀錄。
@@ -63,7 +64,7 @@ Runner 只有 Python 標準函式庫；程式可讀 `/input/<來源 SHA256>.<副
 | 合成任務 | `tests/test_p3.py`：摘要、文獻比較、CSV、程式測試、草稿各 3 次 | 本機自動驗證；Runner 與 AI 明確使用合成替身 |
 | 功能／失敗路徑 | 核准、來源範圍、JSON Schema、停止、有限重試、重啟續跑、預算、偽造數據、審閱與 PDF | 本機自動測試 |
 | PDF 視覺 | 合成 CSV 草稿的兩頁 PDF 渲染圖片 | 已核對圖表、表格、中文與頁碼，無截斷／溢出 |
-| 真實隔離 | `tests/test_p3_sandbox.py`：私人檔案、環境秘密、網路、唯讀根目錄、檔案限制、逾時與取消 | 本機未執行：無 Docker；Linux CI 已配置，尚未取得遠端執行結果 |
+| 真實隔離 | `tests/test_p3_sandbox.py`：私人檔案、環境秘密、網路、唯讀根目錄、檔案限制、逾時、取消與直接完成作業的真實程式執行 | 2026-11-04 本機 Docker Desktop `desktop-linux` 實測 19 項通過；AI 使用合成回覆 |
 | 真人 AI | 五類任務各三次的真實學校連線、內容品質、成功率與原因 | 待本人核准資料後驗收 |
 
 ```powershell
@@ -71,11 +72,16 @@ Runner 只有 Python 標準函式庫；程式可讀 `/input/<來源 SHA256>.<副
 .venv/Scripts/python.exe scripts/validate_p3.py
 # 完整回歸
 .venv/Scripts/python.exe -m pytest -q
+# 啟用真實 Docker 後的完整回歸
+$env:NTPU_TEST_RUNNER = '1'
+.venv/Scripts/python.exe -m pytest -q
+Remove-Item Env:NTPU_TEST_RUNNER
 .venv/Scripts/ruff.exe check backend frontend tests runner scripts/setup_runner.py scripts/validate_p3.py
 .venv/Scripts/python.exe scripts/check_repository.py
 ```
 
 結果保存在 `.local/p3/validation.json`；真實 Runner 啟用時若無法啟動，不會跳過而偽裝通過。
+2026-11-04 完整回歸為 301 項通過、0 失敗、0 略過，JUnit 證據為 `.local/docker-validation-all.xml`。
 一般回歸會明確 skip 真實容器測試。真人 P3 Gate 完成前不能將本文件標成「P3 Gate 全通過」。
 
 參考官方契約：[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、
