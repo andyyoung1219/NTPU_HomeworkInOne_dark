@@ -156,7 +156,7 @@ class LearningCenter:
         if not asset.get("path"):
             issues.append({"name": name, "code": "尚未下載，僅索引檔名"})
             return
-        if Path(name).suffix.lower() not in {".pdf", ".docx", ".txt", ".csv"}:
+        if Path(name).suffix.lower() not in {".pdf", ".docx", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".webp"}:
             issues.append({"name": name, "code": "此格式僅索引檔名"})
             return
         try:
@@ -169,13 +169,13 @@ class LearningCenter:
                 fail("ASSET_CHANGED")
             key = kind + ":" + ref
             cached = self.study.store.get(self.study.user, "search_document", key)
-            if cached and cached["sha256"] == digest:
+            if cached and cached["sha256"] == digest and cached.get("parser_version") == 2:
                 chunks, flags = cached["chunks"], cached["flags"]
             else:
                 chunks, flags = parse(data, Path(name).suffix.lower(),
                                       asset.get("mime_type") or "application/octet-stream", ref)
                 self.study.store.save(self.study.user, "search_document", key,
-                                      {"sha256": digest, "chunks": chunks, "flags": flags})
+                                      {"sha256": digest, "chunks": chunks, "flags": flags, "parser_version": 2})
             for chunk in chunks:
                 add(cid, kind, ref, name, chunk["text"], **meta, sha256=digest,
                     page=chunk.get("page"), section=chunk.get("section"), flags=flags)

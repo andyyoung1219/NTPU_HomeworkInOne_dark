@@ -88,3 +88,11 @@ Remove-Item Env:NTPU_TEST_RUNNER
 參考官方契約：[LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)、
 [Docker runtime constraints](https://docs.docker.com/engine/containers/run/)、
 [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/)。
+
+
+## P5 補強後真實 Docker 重驗（2026-11-05）
+
+啟用 `NTPU_TEST_RUNNER=1` 執行完整回歸，**376 passed、0 failed、0 skipped（139.59 秒）**，其中本文件的真實 Docker 19 項全部通過。
+沿用 `desktop-linux` 的既有不可變 Runner 映像；逾時與取消後核對無遺留 `ntpu-p3-*` 容器。
+AI 使用合成回覆，真人 AI 品質 Gate 仍待驗收。JUnit：`.local/p5-docker-full.xml`；環境與逐項 Docker 摘要：`.local/p5-docker-validation.json`。
+本次環境恢復與範圍見 [P5 工程補強](P5_VALIDATION.md)。

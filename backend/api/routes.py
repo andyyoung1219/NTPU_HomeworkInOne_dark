@@ -16,6 +16,12 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=300, repr=False)
 
 
+class DeleteAccountRequest(BaseModel):
+    confirmation: str = Field(min_length=64, max_length=64)
+    confirmed: bool = False
+    clear_ai: bool = False
+
+
 class AssetRequest(BaseModel):
     selected_asset_ids: list[str] = Field(default_factory=list, max_length=20)
     approved: bool = False
@@ -31,6 +37,7 @@ class TaskRequest(BaseModel):
     data_transfer_approved: bool = False
     allow_external_research: bool = False
     allow_code_execution: bool = False
+    allow_visual_transfer: bool = False
     agent: AgentOptions = Field(default_factory=AgentOptions)
 
 
@@ -87,6 +94,19 @@ def success(value):
 
 def routes(service):
     api = APIRouter()
+
+    @api.get("/maintenance/deletion-preview")
+    def deletion_preview():
+        return success(service.maintenance.preview())
+
+    @api.post("/maintenance/delete-account")
+    def delete_account(body: DeleteAccountRequest):
+        return success(service.maintenance.delete(**body.model_dump()))
+
+    @api.get("/maintenance/diagnostics")
+    def diagnostics():
+        return JSONResponse(service.maintenance.diagnostics(), headers={
+            "Content-Disposition": 'attachment; filename="diagnostics.json"'})
 
     @api.get("/dashboard")
     def dashboard():
@@ -281,16 +301,18 @@ def routes(service):
 
     @api.get("/artifacts/{task_id}/download")
     def artifact(task_id: str, kind: str = "pdf"):
+        import hashlib
         task = service.get("task", task_id)
         workspace = service.workspace(service.user, task_id)
         if kind == "pdf" and task.get("pdf"):
             path, mime = service.safe_path(task["pdf"]), "application/pdf"
+            if hashlib.sha256(path.read_bytes()).hexdigest() != task.get("qa", {}).get("sha256"):
+                raise StudyError("ARTIFACT_CHANGED")
         elif kind == "markdown" and task["draft"]:
             path, mime = workspace / "work/report.md", "text/markdown"
         elif kind == "manifest" and task.get("pdf"):
             path, mime = workspace / "output/manifest.json", "application/json"
         elif kind in {"docx", "zip"} and kind in task.get("exports", {}):
-            import hashlib
             item = task["exports"][kind]
             path = service.safe_path(item["path"])
             if not path.resolve().is_relative_to(workspace.resolve()):
@@ -301,6 +323,8 @@ def routes(service):
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         else:
             raise StudyError("ARTIFACT_NOT_AVAILABLE")
+        if not path.resolve().is_relative_to(workspace.resolve()):
+            raise StudyError("PATH_OUTSIDE_WORKSPACE")
         return FileResponse(path, filename=path.name, media_type=mime)
 
     @api.get("/tasks/{task_id}/artifacts/{name}")

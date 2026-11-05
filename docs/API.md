@@ -149,3 +149,22 @@ PDF 匯出失敗時，Markdown 與已生成程式檔仍可直接下載。ZIP 會
 不重新下載，也不送 AI。新文字快照以 UTF-8 原樣保存換行；舊 Windows 快照只有在還原 CRLF 後
 完全符合原核准 hash 時才相容處理，內容或附件真的異動仍回報 `ARTIFACT_CHANGED`。
 打包 ZIP 會重用並驗證已登錄的 Word，避免後續來源檢查失敗時改寫既有下載檔。
+
+## 本機資料維護（P5 工程補強）
+
+- `GET /maintenance/deletion-preview`：取得目前帳號的清除範圍、筆數、限制與 confirmation 快照。清除未完成時仍可重新預覽。
+- `POST /maintenance/delete-account`：`{"confirmation":"<預覽回傳值>","confirmed":true,"clear_ai":false}`。未確認、帳號／資料快照變動或任務執行中拒絕操作。clear_ai 僅明確選擇時清除共用 AI 專用 Profile。
+- `GET /maintenance/diagnostics`：下載白名單欄位的 JSON 診斷，不含資料原文、憑證或路徑。
+
+以上均沿用本機 session／Host／Origin 保護。清除中斷時帳號一般存取回報 `ACCOUNT_DELETION_PENDING`；草稿保存中斷時該任務回報 `DRAFT_RECOVERY_REQUIRED`，重新啟動恢復。
+
+
+## 視覺與公開研究請求補充
+
+`TaskRequest.allow_visual_transfer` 預設 false，須為 true 才允許逐步任務把所選來源圖像送到 NTPU AI；此值包含在任務核准快照，文字節錄核准不自動擴大為傳送整張來源圖。直接完成模式的開始核准涵蓋本次必要影像。
+
+`agent.research_provider` 可為 `crossref`（相容預設）、`europepmc`、`combined`；`agent.research_full_text` 預設 false。主題／DOI 查詢限 300 字元。直接完成模式預設 combined 與可用開放全文節錄。任務的既有 external 核准、請求與字元預算仍適用。
+
+圖片只從本次已選定的檔案快照產生。`visual_input` 保存合成圖 hash、來源位置、image_name 與省略限制；`source_images` 保存 Word 可嵌入的已登錄圖片。研究來源使用相容的 `crossref:` 或新 `research:` file_id，來源與內容 hash 可隨核准的 ZIP 保存。
+
+詳見 [文件與研究擴充驗證](DOCUMENT_RESEARCH_VALIDATION.md)。

@@ -7,6 +7,17 @@ import gradio as gr
 from backend.services.study import error_code
 
 ERRORS = {
+    "DRAFT_RECOVERY_REQUIRED": "草稿保存中斷，請重新啟動程式以恢復最後成功保存的版本。",
+    "DISK_FULL": "磁碟空間不足，請釋放空間後重試。",
+    "LOCAL_FILE_UNAVAILABLE": "本機檔案無法讀寫，請檢查權限或是否被其他程式占用。",
+    "DATABASE_UNAVAILABLE": "本機資料庫無法寫入或讀取，請關閉其他實例並檢查磁碟後重試。",
+    "ACCOUNT_DELETION_PENDING": "帳號資料清除尚未完成，請在連線管理重新預覽並重試清除。",
+    "DELETE_CONFIRMATION_REQUIRED": "請重新預覽清除範圍，並勾選確認。資料或帳號變更後須重新確認。",
+    "TASK_RUNNING": "任務仍在執行，請取消並等候停止後再操作。",
+    "PATH_OUTSIDE_WORKSPACE": "資料路徑不符合允許範圍，操作已停止。",
+    "APP_RESTARTED_REVIEW_REQUIRED": "上次執行中斷，已保存草稿或檢查點；請核對後續跑或重新產生。",
+    "OPERATION_FAILED": "操作未完成，已保留可用資料；請重試並下載診斷供核對。",
+    "OPERATION_TIMEOUT": "操作等待逾時，請檢查連線後重試。",
     "MOODLE_LOGIN_REQUIRED": "請先在「連線管理」登入 Moodle，檢查並恢復 Moodle 連線。",
     "moodle_login_required": "Moodle 連線尚未建立，請先恢復或重新登入 Moodle。",
     "invalidtoken": "Moodle 連線已過期，請先重新登入 Moodle，再連結校務。",

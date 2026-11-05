@@ -162,14 +162,14 @@ def build_ui(service):
             return "尚未選擇作業", "", gr.update(choices=[], value=[]), "", "", "", "", False
         return (*detail(identifier), *prepare(identifier, []))
 
-    def start(assignment, assets, mode, instruction, excerpt, checklist, approved):
+    def start(assignment, assets, mode, instruction, excerpt, checklist, approved, visual_approved=False):
         if not approved:
             yield "", "請先核對節錄並核准本次傳送。", gr.update(), gr.update(), False
             return
         try:
             task = service.create_task({"assignment_id": assignment, "selected_asset_ids": assets,
                 "mode": mode, "instruction": instruction, "excerpt": excerpt, "requirements": checklist,
-                "data_transfer_approved": True}, uuid.uuid4().hex)
+                "data_transfer_approved": True, "allow_visual_transfer": visual_approved is True}, uuid.uuid4().hex)
             yield from watch_generation(task["id"])
         except Exception as exc:
             yield "", error(exc), gr.update(), gr.update(), False
@@ -347,8 +347,8 @@ def build_ui(service):
         if not assignment or not excerpt.strip():
             raise gr.Error("作業或節錄尚未準備好，請回上一步讀取資料。")
 
-    def begin(assignment, assets, mode, instruction, excerpt, checklist, approved):
-        yield from show_generation(start(assignment, assets, mode, instruction, excerpt, checklist, approved))
+    def begin(assignment, assets, mode, instruction, excerpt, checklist, approved, visual_approved=False):
+        yield from show_generation(start(assignment, assets, mode, instruction, excerpt, checklist, approved, visual_approved))
 
     def begin_completion(assignment):
         yield from show_generation(start_completion(assignment), auto_review=True)
@@ -426,7 +426,7 @@ def build_ui(service):
             raise gr.Error(error(exc) + "；請更新任務狀態，或重新產生草稿。") from exc
         yield from show_generation(watch_generation(identifier), clear_draft=False, auto_review=automatic)
 
-    def regenerate(previous_id, assignment, assets, mode, instruction, excerpt, checklist):
+    def regenerate(previous_id, assignment, assets, mode, instruction, excerpt, checklist, visual_approved=False):
         if not previous_id:
             raise gr.Error("請先從 AI 設定建立任務，再重新產生草稿。")
         with service.lock:
@@ -441,7 +441,7 @@ def build_ui(service):
             yield from begin_completion(assignment)
             return
         validate_start(assignment, excerpt, True)
-        yield from begin(assignment, assets, mode, instruction, excerpt, checklist, True)
+        yield from begin(assignment, assets, mode, instruction, excerpt, checklist, True, visual_approved)
 
     def review_task(identifier):
         if not identifier:
@@ -627,6 +627,7 @@ def build_ui(service):
             with gr.Row():
                 checklist = gr.Textbox(label="題目要求檢查表（請核對、補充或更正）", lines=12)
                 excerpt = gr.Textbox(label="本次將送給 NTPU AI 的節錄（可刪改）", lines=12)
+            visual_approved = gr.Checkbox(label="允許將選定附件中的圖表／公式影像傳給 NTPU AI（最多四張頁面或圖片；與上方文字節錄分開核准）", value=False)
             approved = gr.Checkbox(label="已核對以上附件節錄與要求；核准本次傳給 NTPU AI")
             with gr.Row(elem_classes="page-actions"):
                 configure_back = gr.Button("← 上一步：讀取資料")
@@ -707,6 +708,9 @@ def build_ui(service):
         sync_event = sync_button.click(sync, course, [assignment, sync_status], api_name=False)
         asset_event = assets.input(lambda: (False, "", "", "附件選取已變更，請重新讀取作業文字與選定附件。"),
                                   outputs=[approved, excerpt, checklist, download_status], api_name=False)
+        for component in [assets, assignment]:
+            component.change(lambda: False, outputs=visual_approved, api_name=False)
+        visual_approved.change(lambda: False, outputs=approved, api_name=False)
         for component in [excerpt, checklist, instruction, mode]:
             component.change(lambda: False, outputs=approved, api_name=False)
         task_outputs = [task_id, task_status, editor, preview, reviewed]
@@ -715,13 +719,13 @@ def build_ui(service):
         completion_timer = gr.Timer(2)
         completion_timer.tick(poll_completion, [task_id, page], generation_outputs, queue=False, api_name=False)
         start_button.click(validate_start, [assignment, excerpt, approved], api_name=False).success(
-                           begin, [assignment, assets, mode, instruction, excerpt, checklist, approved],
+                           begin, [assignment, assets, mode, instruction, excerpt, checklist, approved, visual_approved],
                            generation_outputs, api_name=False).then(files, task_id, review_files, api_name=False)
         complete_button.click(require_assignment, assignment, trigger_mode="once", api_name=False).success(
             begin_completion, assignment, generation_outputs, trigger_mode="once", api_name=False).then(
                 files, task_id, review_files, api_name=False)
         regenerate_button.click(
-            regenerate, [task_id, assignment, assets, mode, instruction, excerpt, checklist],
+            regenerate, [task_id, assignment, assets, mode, instruction, excerpt, checklist, visual_approved],
             generation_outputs, trigger_mode="once", api_name=False).then(files, task_id, review_files, api_name=False)
         resume_generation_button.click(resume_generation, task_id, generation_outputs,
             trigger_mode="once", api_name=False).then(files, task_id, review_files, api_name=False)

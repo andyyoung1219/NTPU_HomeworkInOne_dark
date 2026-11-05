@@ -21,6 +21,8 @@ class AgentOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     selected_material_ids: list[str] = Field(default_factory=list, max_length=10)
     research_query: str = Field(default="", max_length=300)
+    research_provider: Literal["crossref", "europepmc", "combined"] = "crossref"
+    research_full_text: bool = False
     python_code: str = Field(default="", max_length=20000)
     csv_asset_id: str = Field(default="", max_length=100)
     csv_column: str = Field(default="", max_length=100)
@@ -133,7 +135,7 @@ def make_plan(task):
     if options["selected_material_ids"]:
         add("search_course_materials", "僅檢索本次已選的同課程教材", {"query": request["instruction"]})
     if request["allow_external_research"]:
-        add("web_research", "以核准的查詢向 Crossref 查公開文獻 metadata",
+        add("web_research", "依核准設定查詢公開文獻、摘要與可用開放全文節錄",
             {"query": options["research_query"]})
     if request["allow_code_execution"]:
         add("write_artifact", "保存供審閱的程式快照", {"name": "analysis.py", "text": options["python_code"]}, ["analysis.py"])

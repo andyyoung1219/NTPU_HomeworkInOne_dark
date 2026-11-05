@@ -113,3 +113,8 @@
 .venv/Scripts/python.exe scripts/check_repository.py
 uv lock --check --offline
 ```
+
+
+## 後續文件能力更新（2026-11-05）
+
+本文件的「不支援 OCR、公式／圖片待補、寬表超過六欄拒絕」描述當時範圍。後續已加入本機 OCR、核准後的真實視覺判讀、Word 可編輯公式／嵌圖／橫向寬表與代表性五頁原生 Word 版面驗證，詳見 [文件與研究擴充驗證](DOCUMENT_RESEARCH_VALIDATION.md)。

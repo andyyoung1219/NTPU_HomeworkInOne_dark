@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from backend.api.routes import routes, safe_exception
 from backend.p0.moodle import probe
-from backend.services.study import StudyError, StudyService
+from backend.services.study import StudyError, StudyService, error_code
 from frontend.gradio_app import CSS, build_ui
 
 PORT = 8766
@@ -51,8 +51,8 @@ def create_app(service=None, key=None):
                 return JSONResponse({"error": "LOCAL_AUTH_REQUIRED"}, status_code=401)
         try:
             response = await call_next(request)
-        except Exception:
-            return JSONResponse({"error": {"code": "OPERATION_FAILED"}}, status_code=500)
+        except Exception as error:
+            return JSONResponse({"error": {"code": error_code(error)}}, status_code=500)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"

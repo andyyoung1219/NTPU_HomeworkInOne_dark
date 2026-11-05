@@ -1,6 +1,8 @@
 """JSON-RPC-style pipe client. No cookie export and no local unauthenticated AI port."""
 
+import base64
 import concurrent.futures
+import hashlib
 import json
 import subprocess
 import threading
@@ -12,6 +14,27 @@ from .evidence import ROOT
 
 class AIError(Exception):
     pass
+
+
+MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024
+
+
+def encode_attachment(attachment):
+    """Bind an explicitly approved visual upload to exact PNG bytes, never paths."""
+    if not isinstance(attachment, dict) or set(attachment) != {"data", "mime_type", "sha256", "approved"}:
+        raise AIError("INVALID_ATTACHMENT")
+    if attachment["approved"] is not True:
+        raise AIError("ATTACHMENT_APPROVAL_REQUIRED")
+    data = attachment["data"]
+    if not isinstance(data, bytes) or not 0 < len(data) <= MAX_ATTACHMENT_BYTES:
+        raise AIError("INVALID_ATTACHMENT")
+    if attachment["mime_type"] != "image/png" or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise AIError("INVALID_ATTACHMENT")
+    digest = hashlib.sha256(data).hexdigest()
+    if attachment["sha256"] != digest:
+        raise AIError("ATTACHMENT_CHANGED")
+    return {"data_base64": base64.b64encode(data).decode("ascii"), "mime_type": "image/png",
+            "sha256": digest, "approved": True}
 
 
 def connection_status(adapter, *, timeout_seconds=60, cancel=None):
@@ -96,14 +119,17 @@ class AIAdapter:
         finally:
             self.requests.pop(identifier, None)
 
-    def begin(self, prompt, asset_ref=None, *, timeout_seconds=120, cancel=None, task_id=None):
+    def begin(self, prompt, asset_ref=None, *, timeout_seconds=120, cancel=None, task_id=None,
+              attachment=None):
+        visual = encode_attachment(attachment) if attachment is not None else None
         task_id = task_id or "p0-" + uuid.uuid4().hex
         future = concurrent.futures.Future()
         self.jobs[task_id] = future
         try:
+            options = {"attachment": visual} if visual is not None else {}
             self.rpc("start_task", task_id=task_id, prompt=prompt, approved=True, asset_ref=asset_ref,
                      timeout_ms=max(1, min(300000, int(timeout_seconds * 1000))),
-                     timeout_seconds=timeout_seconds, cancel=cancel)
+                     timeout_seconds=timeout_seconds, cancel=cancel, **options)
         except Exception:
             self.jobs.pop(task_id, None)
             raise

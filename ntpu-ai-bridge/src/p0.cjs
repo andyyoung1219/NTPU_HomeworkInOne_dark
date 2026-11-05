@@ -3,11 +3,46 @@
 const path = require('node:path');
 const os = require('node:os');
 const readline = require('node:readline');
+const { createHash } = require('node:crypto');
+const sharp = require('sharp');
 const { BrowserBridge } = require('../vendor/src/browser');
 const storageRoot = path.join(process.env.LOCALAPPDATA || os.homedir(), 'NTPU HomeworkInOne', 'p0');
 const bridge = new BrowserBridge({ storageRoot, workspaces: [path.resolve(__dirname, '../..')] });
 const jobs = new Map();
 let stopped = false;
+const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
+const MAX_ATTACHMENT_ENCODED = Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4;
+const MAX_ATTACHMENT_PIXELS = 20000000;
+const MAX_VISUAL_REQUEST_CHARS = MAX_ATTACHMENT_ENCODED + 400000;
+
+async function decodeAttachment(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).sort().join(',') !== 'approved,data_base64,mime_type,sha256')
+    throw new Error('INVALID_ATTACHMENT');
+  if (value.approved !== true) throw new Error('ATTACHMENT_APPROVAL_REQUIRED');
+  if (value.mime_type !== 'image/png' || typeof value.data_base64 !== 'string'
+      || !value.data_base64.length || value.data_base64.length > MAX_ATTACHMENT_ENCODED
+      || value.data_base64.length % 4 || /[^A-Za-z0-9+/=]/.test(value.data_base64)
+      || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256))
+    throw new Error('INVALID_ATTACHMENT');
+  const buffer = Buffer.from(value.data_base64, 'base64');
+  if (!buffer.length || buffer.length > MAX_ATTACHMENT_BYTES
+      || buffer.toString('base64') !== value.data_base64
+      || !buffer.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')))
+    throw new Error('INVALID_ATTACHMENT');
+  if (createHash('sha256').update(buffer).digest('hex') !== value.sha256)
+    throw new Error('ATTACHMENT_CHANGED');
+  try {
+    const image = sharp(buffer, { limitInputPixels: MAX_ATTACHMENT_PIXELS, animated: true });
+    const metadata = await image.metadata();
+    if (metadata.format !== 'png' || !metadata.width || !metadata.height
+        || metadata.width * metadata.height > MAX_ATTACHMENT_PIXELS || (metadata.pages || 1) !== 1)
+      throw new Error('INVALID_ATTACHMENT');
+    // Decode all pixels now: a PNG signature/IHDR alone is not a valid image.
+    await image.stats();
+  } catch { throw new Error('INVALID_ATTACHMENT'); }
+  return { name: 'sources.png', mimeType: 'image/png', buffer, approved: true };
+}
 function output(message) { process.stdout.write(JSON.stringify(message) + '\n'); }
 function code(error) {
   const message = String(error?.message || '');
@@ -45,10 +80,14 @@ async function dispatch(method, params) {
           || params.timeout_ms < 1 || params.timeout_ms > 300000)) throw new Error('INVALID_REQUEST');
       // Reference only; never accept or resolve caller-provided file paths.
       if (params.asset_ref && !/^[a-f0-9]{24}$/.test(params.asset_ref)) throw new Error('INVALID_REFERENCE');
+      const attachment = params.attachment === undefined ? undefined : await decodeAttachment(params.attachment);
+      // Image decoding yields; recheck before claiming the single chat slot.
+      if (jobs.size) throw new Error('BUSY');
       const controller = new AbortController();
       jobs.set(params.task_id, controller);
       void bridge.chat(params.prompt, {
         signal: controller.signal, timeoutMs: params.timeout_ms ?? 180000,
+        attachment,
         onToken: () => output({ event: 'progress', task_id: params.task_id }),
       }).then(result => output({ event: 'completed', task_id: params.task_id, text: result.text }))
         .catch(error => output({ event: 'failed', task_id: params.task_id, code: code(error) }))
@@ -69,15 +108,23 @@ async function dispatch(method, params) {
     default: throw new Error('METHOD_NOT_ALLOWED');
   }
 }
-const input = readline.createInterface({ input: process.stdin });
-input.on('line', line => {
-  if (line.length > 100000) return;
+if (require.main === module) {
+  const input = readline.createInterface({ input: process.stdin });
+  input.on('line', line => {
+  if (line.length > MAX_VISUAL_REQUEST_CHARS) return;
   let request;
   try { request = JSON.parse(line); } catch { return; }
+  if (line.length > 100000 && (request.method !== 'start_task' || !request.params?.attachment)) {
+    output({ id: request.id, error: { code: 'INVALID_REQUEST' } }); return;
+  }
   void dispatch(request.method, request.params || {})
     .then(result => { output({ id: request.id, result }); if (stopped) process.exit(0); })
     .catch(error => output({ id: request.id, error: { code:
-      ['BUSY', 'INVALID_REQUEST', 'APPROVAL_REQUIRED', 'METHOD_NOT_ALLOWED', 'INVALID_REFERENCE'].includes(error.message)
+      ['BUSY', 'INVALID_REQUEST', 'APPROVAL_REQUIRED', 'METHOD_NOT_ALLOWED', 'INVALID_REFERENCE',
+        'INVALID_ATTACHMENT', 'ATTACHMENT_APPROVAL_REQUIRED', 'ATTACHMENT_CHANGED'].includes(error.message)
         ? error.message : code(error) } }));
 });
 input.on('close', () => { void bridge.close({ cleanup: false }).finally(() => process.exit(0)); });
+}
+
+module.exports = { decodeAttachment, MAX_ATTACHMENT_BYTES };

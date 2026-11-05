@@ -4,10 +4,16 @@
   "private": true,
   "description": "Pinned upstream BrowserBridge with only the runtime dependencies required by P1",
   "license": "MIT",
-  "engines": { "node": ">=20.9" },
-  "dependencies": {
-    "playwright-core": "1.64.0",
-    "sharp": "0.35.5"
+  "engines": {
+    "node": ">=20.9"
   },
-  "scripts": { "test": "node --check src/p0.cjs" }
+  "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
+    "playwright-core": "1.64.0",
+    "sharp": "0.35.5",
+    "tesseract.js": "7.0.0"
+  },
+  "scripts": {
+    "test": "node --check src/p0.cjs"
+  }
 }

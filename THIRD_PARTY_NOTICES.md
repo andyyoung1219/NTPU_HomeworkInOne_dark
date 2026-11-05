@@ -39,3 +39,18 @@ Python 套件以 `uv.lock` 鎖定，P1 Node 用自己的最小 `ntpu-ai-bridge/p
 
 PyMuPDF 並非寬鬆 MIT 授權；未來發布時依所選授權處理。本次只做本機開發。
 間接依賴完整版本由 `uv.lock` 與來源 `package-lock.json` 保存；套件原始聲明保留在安裝目錄。
+
+
+## OCR、公式與圖片傳輸補充（2026-11-05）
+
+| 套件 | 鎖定版本 | 授權與用途 |
+| --- | --- | --- |
+| RapidOCR | 3.10.0 | Apache-2.0；本機中英文字辨識，使用 wheel 內附 PP-OCRv6 detection/recognition 與方向分類 ONNX 模型，模型不另外提交 Git |
+| ONNX Runtime | 1.31.1 | MIT；CPU 推論 |
+| latex2mathml | 3.81.1 | MIT；LaTeX → MathML → 可編輯 Office Math |
+| tesseract.js | 7.0.0 | Apache-2.0；上游附件安全掃描的本機 WASM 引擎 |
+| @tesseract.js-data/eng | 1.0.0 | MIT（套件 metadata）；內附英文辨識資料，保留套件原始聲明 |
+
+新增 Python 間接依賴（OpenCV、Shapely、pyclipper 等）的版本、wheel hash 與授權聲明保留於 `uv.lock` 及安裝 metadata。
+Tesseract、ONNX 與 RapidOCR 的程式及模型原始授權保留在各安裝套件內；不將模型、課程文件或個人資料放入 Git。
+Crossref、Europe PMC 與 UCI 資料仍依各來源的權利／授權使用；取得 metadata 不表示取得論文全文使用權，開放全文節錄保留 API 回傳的 license 與來源 hash。

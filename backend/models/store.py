@@ -16,6 +16,10 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version > 2:
+                raise RuntimeError("DATABASE_VERSION_UNSUPPORTED")
+            # Version 2 is additive: preserve all existing records and events.
             db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS records (
@@ -27,7 +31,10 @@ class Store:
                     user_id TEXT NOT NULL, task_id TEXT NOT NULL, seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     event TEXT NOT NULL, code TEXT, created_at TEXT NOT NULL
                 );
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS account_deletions (
+                    user_id TEXT PRIMARY KEY, clear_ai INTEGER NOT NULL DEFAULT 0
+                );
+                PRAGMA user_version=2;
             """)
 
     @contextmanager

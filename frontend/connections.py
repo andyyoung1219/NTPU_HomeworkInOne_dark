@@ -106,6 +106,21 @@ def build_connections(service, trigger, page):
         except Exception as exc:
             return error_message(exc)
 
+    def deletion_preview():
+        try:
+            value = service.maintenance.preview()
+            count = sum(value['counts'].values())
+            return value['confirmation'], f"{value['scope']} 共 {count} 筆資料。\n\n{value['limits']}\n\n{value['ai_scope']}", False
+        except Exception as exc:
+            return "", error_message(exc), False
+
+    def delete_account(snapshot, confirmed, clear_ai):
+        try:
+            service.maintenance.delete(snapshot, confirmed, clear_ai)
+            return "", "目前帳號的本機資料已清除。請重新登入後使用。", False, {}, True
+        except Exception as exc:
+            return "", error_message(exc) + " 請重新預覽範圍後重試。", False, {}, False
+
     with gr.Column(visible=False, elem_id="connection-modal") as modal:
         with gr.Column(elem_id="connection-panel"):
             with gr.Row():
@@ -128,6 +143,14 @@ def build_connections(service, trigger, page):
             with gr.Row():
                 recheck = gr.Button("重新檢查連線")
                 signout = gr.Button("登出所選服務")
+            with gr.Accordion("本機資料與診斷", open=False):
+                gr.Markdown('[下載去識別化診斷](/api/maintenance/diagnostics)（目前帳號的任務狀態與錯誤碼）')
+                preview_delete = gr.Button("預覽目前帳號的清除範圍")
+                delete_snapshot = gr.State("")
+                delete_scope = gr.Markdown("先預覽範圍，再確認清除。此操作無法復原。")
+                delete_confirm = gr.Checkbox(label="我確認清除上述本機資料", value=False)
+                clear_ai = gr.Checkbox(label="同時清除本應用程式共用的 AI 專用瀏覽器資料與登入", value=False)
+                erase = gr.Button("清除目前帳號的本機資料", variant="stop")
 
     eye.click(None, js="""() => {
       const input = document.querySelector('#login-password input');
@@ -155,6 +178,9 @@ def build_connections(service, trigger, page):
     logout_event = signout.click(logout, [provider, states], [states, status, *fields_outputs, auth_changed],
                                 js=MASK_PASSWORD_JS, api_name=False)
     ai_open.click(open_ai, outputs=status, api_name=False)
+    preview_delete.click(deletion_preview, outputs=[delete_snapshot, delete_scope, delete_confirm], api_name=False)
+    delete_event = erase.click(delete_account, [delete_snapshot, delete_confirm, clear_ai],
+                              [delete_snapshot, delete_scope, delete_confirm, states, auth_changed], api_name=False)
     # Only credential changes reload drafts; checking a connection must not
     # overwrite unsaved edits in the homework wizard.
-    return (login_event, logout_event, enter_event), (open_event, recheck_event), auth_changed
+    return (login_event, logout_event, enter_event, delete_event), (open_event, recheck_event), auth_changed

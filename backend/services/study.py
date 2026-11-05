@@ -1,8 +1,12 @@
 import concurrent.futures
+import errno
 import hashlib
 import json
+import os
 import re
 import shutil
+import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -33,23 +37,35 @@ class StudyError(Exception):
 
 
 def error_code(error):
+    if isinstance(error, (TimeoutError, concurrent.futures.TimeoutError)):
+        return "OPERATION_TIMEOUT"
+    if isinstance(error, OSError):
+        return "DISK_FULL" if error.errno == errno.ENOSPC else "LOCAL_FILE_UNAVAILABLE"
+    if isinstance(error, sqlite3.Error):
+        return "DATABASE_UNAVAILABLE"
     if isinstance(error, (StudyError, probe.ProbeError)):
         return error.code
     if isinstance(error, AIError):
         code = str(error)
         return code if code in {"AI_AUTH_REQUIRED", "AI_SERVICE_LIMIT", "AI_TIMEOUT", "CANCELLED",
-                                "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED", "RATE_LIMITED", "PERMISSION_DENIED"} else "AI_BRIDGE_ERROR"
-    if isinstance(error, (TimeoutError, concurrent.futures.TimeoutError)):
-        return "OPERATION_TIMEOUT"
+                                "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED", "RATE_LIMITED", "PERMISSION_DENIED",
+                                "INVALID_ATTACHMENT", "ATTACHMENT_APPROVAL_REQUIRED", "ATTACHMENT_CHANGED"} else "AI_BRIDGE_ERROR"
     return "OPERATION_FAILED"
 
 
 def atomic_text(path, text):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_suffix(path.suffix + ".tmp")
-    pending.write_text(text, encoding="utf-8", newline="")
-    pending.replace(path)
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    pending = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def synchronized(method):
@@ -67,7 +83,7 @@ class StudyService:
         self.store = Store(self.root / "study.sqlite3")
         self.ai = adapter or AIAdapter()
         self.moodle = MoodleProbe(
-            supported_suffixes={".pdf", ".docx", ".txt", ".csv"},
+            supported_suffixes={".pdf", ".docx", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".webp"},
             inspector=lambda data, ext, mime: parse(data, ext, mime, "pending")[0],
             download_dir=self.root / "incoming",
         )
@@ -76,8 +92,13 @@ class StudyService:
         self.user = None
         self.active_path = self.root / "active-user.json"
         if self.active_path.exists():
-            value = json.loads(self.active_path.read_text())
-            if re.fullmatch(r"[a-f0-9]{24}", value.get("user_id", "")):
+            try:
+                value = json.loads(self.active_path.read_text(encoding="utf-8"))
+                if not isinstance(value, dict):
+                    value = {}
+            except (ValueError, OSError):
+                value = {}
+            if isinstance(value.get("user_id"), str) and re.fullmatch(r"[a-f0-9]{24}", value["user_id"]):
                 self.user = value["user_id"]
         self.lock = threading.RLock()
         self.ai_lock = threading.Lock()
@@ -86,15 +107,31 @@ class StudyService:
         self.learning = LearningCenter(self)
         from backend.agent.engine import AgentEngine
         self.agent = AgentEngine(self)
-        if self.user:
-            for task in self.store.list(self.user, "task"):
+        from backend.services.maintenance import Maintenance
+        self.maintenance = Maintenance(self)
+        self.maintenance.recover()
+        with self.store.connection() as db:
+            users = [r[0] for r in db.execute('SELECT DISTINCT user_id FROM records WHERE user_id NOT IN (SELECT user_id FROM account_deletions)')]
+        for user in users:
+            for old in self.store.list(user, "draft_recovery"):
+                self.write_draft(user, old)
+                with self.store.connection() as db:
+                    self.store._save(db, user, "task", old["id"], old)
+                    db.execute("DELETE FROM records WHERE user_id=? AND kind='draft_recovery' AND id=?", (user, old["id"]))
+            for task in self.store.list(user, "task"):
                 if task["status"] in {"running", "planning", "exporting"}:
-                    task.update(status="partial", error="APP_RESTARTED_REVIEW_REQUIRED")
-                    self.store.save(self.user, "task", task["id"], task)
+                    task.update(status="waiting_review" if task["status"] == "exporting" and task.get("draft") else "partial",
+                                error="APP_RESTARTED_REVIEW_REQUIRED", reviewed=False,
+                                ready_for_export=False, accepted_incomplete=False)
+                    self.store.save(user, "task", task["id"], task)
+                    self.store.event(user, task["id"], "interrupted", "APP_RESTARTED_REVIEW_REQUIRED")
 
     def require_user(self):
         if not self.user:
             raise StudyError("MOODLE_LOGIN_REQUIRED")
+        with self.store.connection() as db:
+            if db.execute("SELECT 1 FROM account_deletions WHERE user_id=?", (self.user,)).fetchone():
+                raise StudyError("ACCOUNT_DELETION_PENDING")
         return self.user
 
     @synchronized
@@ -152,7 +189,10 @@ class StudyService:
             raise
 
     def get(self, kind, identifier, user=None):
-        value = self.store.get(user or self.require_user(), kind, identifier)
+        owner = user or self.require_user()
+        if kind == "task" and self.store.get(owner, "draft_recovery", identifier):
+            raise StudyError("DRAFT_RECOVERY_REQUIRED")
+        value = self.store.get(owner, kind, identifier)
         if value is None:
             raise StudyError("NOT_FOUND_OR_NOT_AUTHORIZED")
         return value
@@ -256,11 +296,16 @@ class StudyService:
                     continue
             self.moodle.assets[ref] = {"assignment_id": assignment_id, "filename": asset["name"],
                 "fileurl": asset["source_url"], "filesize": asset["size_bytes"]}
+            self.moodle.download_dir = self.root / "incoming" / user
             result = self.moodle.download(ref)
             suffix = Path(asset["name"]).suffix.lower()
             target = self.root / "assets" / user / (result["sha256"] + suffix)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(result["path"], target)
+            if result.get("chunks"):
+                parsed_chunks = [{**chunk, "file_id": ref} for chunk in result["chunks"]]
+                parsed_flags = list(dict.fromkeys(flag for chunk in parsed_chunks for flag in chunk.get("extraction_flags", [])))
+                asset.update(chunks=parsed_chunks, flags=parsed_flags, parser_version=2)
             asset.update(status="downloaded", sha256=result["sha256"],
                          path=str(target.relative_to(self.root)), downloaded_at=now())
             self.store.save(user, "asset", ref, asset)
@@ -288,8 +333,11 @@ class StudyService:
             data = self.safe_path(asset["path"]).read_bytes()
             if hashlib.sha256(data).hexdigest() != asset["sha256"]:
                 raise StudyError("ASSET_CHANGED")
-            extracted, flags = parse(data, Path(asset["name"]).suffix.lower(), asset["mime_type"] or "application/octet-stream", ref)
-            asset.update(chunks=extracted, flags=flags, status="parsed")
+            if asset.get("parser_version") == 2 and asset.get("chunks"):
+                extracted, flags = asset["chunks"], asset.get("flags", [])
+            else:
+                extracted, flags = parse(data, Path(asset["name"]).suffix.lower(), asset["mime_type"] or "application/octet-stream", ref)
+            asset.update(chunks=extracted, flags=flags, status="parsed", parser_version=2)
             self.store.save(user, "asset", ref, asset)
             chunks += extracted
         if not chunks:
@@ -324,7 +372,8 @@ class StudyService:
             raise StudyError("INPUT_SIZE_INVALID")
         normalized = {"assignment_id": assignment["id"], "selected_asset_ids": selected,
                       "mode": mode, "instruction": instruction, "excerpt": excerpt,
-                      "requirements": str(request.get("requirements", ""))[:6000]}
+                      "requirements": str(request.get("requirements", ""))[:6000],
+                      "allow_visual_transfer": request.get("allow_visual_transfer") is True}
         options, materials, material_chunks = self.agent.prepare(request, assignment, assets)
         normalized.update(agent=options, material_chunks=material_chunks,
                           allow_code_execution=bool(request.get("allow_code_execution")),
@@ -365,6 +414,8 @@ class StudyService:
                 if hashlib.sha256(data).hexdigest() != asset["sha256"]:
                     raise StudyError("ASSET_CHANGED")
                 snapshot.write_bytes(data)
+            from backend.services.visual import ensure_visual_snapshot
+            ensure_visual_snapshot(self, user, task)
             atomic_text(workspace / "extracted/assignment_requirements.json",
                         json.dumps({"requirements": normalized["requirements"],
                                     "source_hashes": task["source_hashes"]}, ensure_ascii=False))
@@ -406,7 +457,7 @@ class StudyService:
                 task["approvals"] = {"high": high, "external": external, "snapshot": snapshot_hash,
                                      "approved_at": now()}
             for ref, expected in task["source_hashes"].items():
-                if ref.startswith("crossref:"):
+                if ref.startswith(("crossref:", "research:")):
                     continue  # Runtime evidence, not an input snapshot.
                 if ref == "assignment-description":
                     current = self.get("assignment", task["assignment_id"])["description"].encode()
@@ -461,7 +512,12 @@ class StudyService:
                 f"\n<documents>{request['excerpt']}</documents>"
                 f"\n<workflow_guidance>{guidance}</workflow_guidance>"
             )
-            bridge_id, future = self.ai.begin(prompt)
+            from backend.services.visual import VISUAL_GUIDANCE, task_attachment
+            prompt += "\n" + VISUAL_GUIDANCE + "\n" + json.dumps(task.get("visual_input", {}), ensure_ascii=False)
+            if isinstance(self.ai, AIAdapter):
+                bridge_id, future = self.ai.begin(prompt, attachment=task_attachment(self, task))
+            else:
+                bridge_id, future = self.ai.begin(prompt)
             job["bridge_id"] = bridge_id
             task["model_task_id"] = bridge_id
             if job["cancel"].is_set():
@@ -569,7 +625,12 @@ class StudyService:
         return draft, model
 
     def workspace(self, user, task_id):
-        return self.root / "workspaces" / user / task_id
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", user) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", task_id):
+            raise StudyError("PATH_OUTSIDE_WORKSPACE")
+        path = self.root / "workspaces" / user / task_id
+        if not path.resolve().is_relative_to(self.root.resolve() / "workspaces" / user):
+            raise StudyError("PATH_OUTSIDE_WORKSPACE")
+        return path
 
     @staticmethod
     def code_blocks(markdown):
@@ -638,6 +699,8 @@ class StudyService:
             task = self.get("task", task_id)
             if task["status"] not in TERMINAL or not markdown.strip() or len(markdown) > 80000:
                 raise StudyError("DRAFT_NOT_EDITABLE")
+            # Durable rollback record spans filesystem and SQLite writes.
+            self.store.save(self.user, "draft_recovery", task_id, task)
             incomplete = task.get("plan") and task["checkpoint"]["cursor"] < len(task["plan"]["steps"])
             status = task["status"] if incomplete and not reviewed else "waiting_review"
             task.update(draft=markdown, reviewed=reviewed, status=status, edited_at=now())
@@ -649,9 +712,12 @@ class StudyService:
             task.pop("qa", None)
             task.pop("exports", None)
             self.write_draft(self.user, task)
-            self.store.save(self.user, "task", task_id, task)
+            with self.store.connection() as db:
+                self.store._save(db, self.user, "task", task_id, task)
+                db.execute("DELETE FROM records WHERE user_id=? AND kind='draft_recovery' AND id=?", (self.user, task_id))
             return task
 
+    @synchronized
     def export(self, task_id):
         with self.lock:
             user = self.require_user()
