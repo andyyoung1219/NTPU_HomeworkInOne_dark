@@ -28,11 +28,11 @@
 
 ## 公開文獻與資料集
 
-直接完成模式會按題目產生公開主題／DOI 查詢，取代原本固定主題列舉。文獻來源為 Crossref metadata／摘要及 Europe PMC 摘要／可用開放全文節錄。去重後保存提供者、作者、DOI／PMCID、來源 URL、取得時間、內容範圍、全文來源 hash、節錄截斷與授權資訊；報告須引用來源，不把 metadata 宣稱成全文。
+逐步模式可核准確切的公開主題／DOI 查詢。直接模式將公開文獻查證列為待辦，並完成其餘可用成果。文獻來源為 Crossref metadata／摘要及 Europe PMC 摘要／可用開放全文節錄。去重後保存提供者、作者、DOI／PMCID、來源 URL、取得時間、內容範圍、全文來源 hash、節錄截斷與授權資訊。報告引用實際取得的資料，並標明 metadata、摘要或全文節錄的範圍。
 
 每次最多 5 筆／提供者，最多取得 2 份開放全文節錄，每份正文最多 16000 字元；截斷明示。單一提供者暫時失敗時 combined 模式保留另一來源；登入／權限／429、取消與預算不足仍停止。每個實際 API／全文請求都先扣除原有任務請求預算。
 
-UCI 目錄擴充為 Wine Quality 紅／白酒、Iris、Heart Disease、Breast Cancer Wisconsin Diagnostic 與 Abalone。題目明示其他 UCI ID 時可透過官方 metadata API 取得該 ID 的 CSV，核對 ID／官方固定下載端點後下載並以固定程式實算資料描述。不得拿別的目錄資料取代題目指定資料。
+UCI 目錄包含 Wine Quality 紅／白酒、Iris、Heart Disease、Breast Cancer Wisconsin Diagnostic 與 Abalone。題目文字可用官方資料集網址或 `UCI dataset ID 53` 一類的標示指定編號。程式先核對題目快照裡的編號，再透過官方 metadata API 取得資料集，並用固定程式實算資料描述。題目指定資料時，依該資料規劃。
 
 只連固定 HTTPS 公開主機與端點，不帶學校憑證、Cookie 或代理環境設定、不跟隨重導向，限制回應大小；XML 不允許外部實體或 DTD。公開來源與附件／工具內容均不能新增權限。研究來源 JSON 與全文節錄可隨「加入題目與原始附件」的 ZIP 保存，下載前核對來源 hash。
 

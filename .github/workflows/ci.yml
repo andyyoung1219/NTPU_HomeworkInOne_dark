@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - name: Prepare locked runtime and upstream parser
         run: |
@@ -33,6 +35,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -45,11 +49,15 @@ jobs:
       - name: Test synthetic fixtures only
         shell: pwsh
         run: |
+          .venv/Scripts/python.exe scripts/check_repository.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .venv/Scripts/ruff.exe check backend frontend tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .venv/Scripts/python.exe -m pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .venv/Scripts/python.exe scripts/check_repository.py
+          npm --prefix frontend run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix frontend test
       - name: Upstream browser contracts
         working-directory: .upstream/ntpu-ai-vscode
         shell: pwsh

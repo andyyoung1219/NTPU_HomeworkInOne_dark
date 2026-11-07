@@ -11,6 +11,7 @@ JSON 回覆使用 `data / meta / error`；例外只回固定代碼，不回原�
 | POST | `/api/connections/moodle/start` | 本人帳密登入（JSON username/password） |
 | POST | `/api/connections/moodle/restore` | 驗證 Vault 身分並同步課程 |
 | POST | `/api/connections/ntpu-ai/start` | 開啟本人登入視窗 |
+| POST | `/api/connections/ntpu-ai/restore` | 檢查並恢復既有 AI 背景連線；執行中回 AI_BUSY |
 | DELETE | `/api/connections/{provider}` | 清除對應連線憑證 |
 | POST | `/api/sync/moodle?course_id=...` | 同步指定課程作業；無 course_id 則同步課程 |
 | GET | `/api/courses` | 課程快取 |
@@ -49,7 +50,7 @@ P3 的 code execution/external research 需要獨立核准，詳見下節。
 
 `POST /api/assignments/{id}/complete` 必帶 `Idempotency-Key` header，JSON body 為 `{"approved":true}`。
 `approved` 預設 false，未核准回報 `COMPLETION_APPROVAL_REQUIRED`。
-此核准涵蓋本次作業的全部支援附件讀取、AI 傳送、允許的公開資料查詢與必要的隔離程式執行。
+此核准涵蓋本次作業的全部支援附件讀取、AI 傳送、允許的 UCI 公開資料集與必要的隔離程式執行。
 服務建立 `mode=complete_assignment` 的背景任務並回傳 202，可透過既有任務查詢、SSE 與取消 API 追蹤。此模式須使用本端點，不能經一般 `POST /api/tasks` 建立。
 相同使用者、作業及 `Idempotency-Key` 會取得原任務；同一 key 用於不同作業或模式回報 `IDEMPOTENCY_CONFLICT`。
 
@@ -66,7 +67,8 @@ P3 的 code execution/external research 需要獨立核准，詳見下節。
 `task.blockers` 仍保存待處理項目作為匯出接受門檻；有待辦時須以 `reviewed=true`、`accept_incomplete=true` 保存草稿，才可使用既有匯出 API。
 成果提供具體解答、設計或分析，並依題目指定語言撰寫；提案與已執行實驗分別以相應證據敘述。
 
-目前資料能力為本次作業附件、UCI Wine Quality 紅／白酒資料集目錄，以及固定公開主題的 Crossref metadata。
+資料來源包括本次作業附件、內建 UCI 公開資料集，以及題目文字明示的 UCI 編號。直接模式將公開文獻查證列入待辦，完成其餘可用成果。
+Crossref 或 Europe PMC 的確切查詢字串須在逐步模式中明確核准。
 CSV 統計由本機固定程式計算；必要的模型產生程式只在 Docker 內以 Python 標準函式庫執行。
 需要其他資料、全文內容、本人資訊或目前不可用工具時，先完成可生成部分，再列出具體補做事項與證據限制；不得編造缺失資料或未執行的結果。
 

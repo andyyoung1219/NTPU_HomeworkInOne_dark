@@ -184,6 +184,10 @@ def test_uci_remote_data_url_must_match_selected_dataset(monkeypatch):
 
 def test_dynamic_uci_dataset_download_is_profiled_and_hash_bound(service, monkeypatch):
     monkeypatch.setattr(service, 'verify_identity', lambda: None)
+    assignment = service.get('assignment', '2')
+    assignment['description'] += ' https://archive.ics.uci.edu/dataset/53/iris'
+    service.store.save(service.user, 'assignment', '2', assignment)
+
     class UCIAI(CompletionAI):
         def begin(self, prompt):
             identifier, future = super().begin(prompt)
@@ -214,6 +218,41 @@ def test_dynamic_uci_dataset_download_is_profiled_and_hash_bound(service, monkey
     assert dataset['profile']['attributes']['sepal']['mean'] == 2.0
     assert result['source_hashes']['dataset:uci-53'] == hashlib.sha256(data).hexdigest()
     assert dataset['file_id'] in result['report_model']['sources']
+
+
+@pytest.mark.parametrize('proposal,expected_action', [
+    ({'research_query': 'synthetic assignment text in a model query'}, completion.LITERATURE_ACTION),
+    ({'literature_required': True}, completion.LITERATURE_ACTION),
+    ({'uci_dataset_id': 12345}, completion.UNVERIFIED_UCI_ACTION),
+])
+def test_direct_completion_withholds_unapproved_lookups_but_keeps_report(
+        service, monkeypatch, proposal, expected_action):
+    monkeypatch.setattr(service, 'verify_identity', lambda: None)
+
+    class ProposingAI(CompletionAI):
+        def begin(self, prompt):
+            identifier, future = super().begin(prompt)
+            if 'dataset_catalog' not in self.calls[-1]:
+                return identifier, future
+            plan = json.loads(future.result())
+            replacement = concurrent.futures.Future()
+            replacement.set_result(json.dumps({**plan, **proposal}))
+            return identifier, replacement
+
+    def unexpected_request(request):
+        pytest.fail('Direct completion transmitted an unapproved public lookup')
+
+    mock_client(monkeypatch, unexpected_request)
+    service.ai = ProposingAI()
+    task = service.complete_assignment('2', 'withheld-lookup')
+    result = await_task(service, task['id'])
+    assert result['status'] == 'waiting_review', result.get('error')
+    assert result['completion']['status'] == 'needs_action'
+    assert expected_action in result['completion']['required_actions']
+    assert expected_action in result['draft']
+    assert 'research_query' not in result['completion_plan']
+    assert result['completion_data']['research'] == {}
+    assert result['completion_data']['datasets'] == []
 
 
 def test_bad_query_never_becomes_a_request():

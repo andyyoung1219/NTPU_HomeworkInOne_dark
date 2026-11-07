@@ -50,7 +50,7 @@
 
 1. [README.md](../README.md)：如何安裝、啟動與使用。
 2. [backend/main.py](../backend/main.py)：整個 MVP 的啟動入口。
-3. [frontend/gradio_app.py](../frontend/gradio_app.py)：畫面、按鈕，以及操作後觸發的動作。
+3. [frontend/static/app.js](../frontend/static/app.js)：新版 HTML 前端的頁面、API 與操作事件；作業流程見 [workflow.js](../frontend/static/workflow.js)。
 4. [backend/services/study.py](../backend/services/study.py)：同步作業、組合資料、AI 任務、審閱與匯出的主要流程。
 5. [backend/models/store.py](../backend/models/store.py)：資料如何保存到 SQLite。
 
@@ -62,7 +62,7 @@
 ```mermaid
 flowchart TD
     Start[run_mvp.ps1 或 python -m backend.main] --> Main[backend/main.py]
-    Main --> UI[frontend/gradio_app.py]
+    Main --> UI[frontend/static/index.html + app.js]
     Main --> API[backend/api/routes.py]
     UI --> Service[backend/services/study.py]
     API --> Service
@@ -99,7 +99,7 @@ flowchart TD
 | 檔案 | 用途 |
 | --- | --- |
 | [backend/__init__.py](../backend/__init__.py) | 空的 Python 套件標記，讓 `backend` 可以被匯入，沒有獨立業務流程。 |
-| [backend/main.py](../backend/main.py) | 建立 FastAPI、StudyService 和 Gradio；掛上 `/api`；處理本機 session cookie、Host／Origin 檢查與安全錯誤回覆；啟動 `127.0.0.1:8766`，印出當次解鎖網址。 |
+| [backend/main.py](../backend/main.py) | 建立 FastAPI、StudyService；提供 HTML／CSS／JS 靜態介面與 `/api`；處理本機 session cookie、Host／Origin 檢查與安全錯誤回覆；啟動 `127.0.0.1:8766`，印出當次解鎖網址。 |
 | [backend/api/__init__.py](../backend/api/__init__.py) | `backend.api` 的空套件標記。 |
 | [backend/api/routes.py](../backend/api/routes.py) | API 路由與 Pydantic 請求格式：連線、課程、作業、附件下載／解析、任務核准／取消、草稿、PDF 匯出、產物下載及 SSE 事件。功能主要交給 StudyService 執行。 |
 
@@ -141,11 +141,16 @@ flowchart TD
 | 檔案 | 用途 |
 | --- | --- |
 | [frontend/__init__.py](../frontend/__init__.py) | `frontend` 的空 Python 套件標記。 |
-| [frontend/gradio_app.py](../frontend/gradio_app.py) | Gradio 首頁、五步驟獨立畫面、直接完成作業、連線管理、草稿預覽與匯出；包含 callback、CSS、進度恢復與核准清除規則。 |
+| [frontend/static/index.html](../frontend/static/index.html) | 正式介面的導覽、頁面容器與對話框。 |
+| [frontend/static/app.js](../frontend/static/app.js) | 儀表板、課程、校務、搜尋、歷史任務與連線管理。 |
+| [frontend/static/workflow.js](../frontend/static/workflow.js) | 五步驟作業、直接完成、進度保存、生成與審閱匯出。 |
+| [frontend/static/styles.css](../frontend/static/styles.css) | 桌面與手機版樣式；配色在 `tokens.css`。 |
+| [frontend/static/ui.js](../frontend/static/ui.js) | 安全 HTML 與 Markdown 預覽、圖示、文字與格式工具。 |
+| [frontend/gradio_app.py](../frontend/gradio_app.py) | 舊 Gradio callback 回歸測試基準；正式入口不再載入。下列 Python 前端模組也僅供舊回歸測試使用。 |
 | [frontend/connections.py](../frontend/connections.py) | 連線管理彈窗、登入狀態檢查與 Moodle／校務／AI 登入交接。 |
 | [frontend/navigation.py](../frontend/navigation.py) | 首頁與各步驟的切換、步驟提示與直接完成模式導覽。 |
 
-要改按鈕名稱、欄位順序、預設需求、配色或錯誤提示，先看 `frontend/gradio_app.py`。
+要改按鈕名稱、欄位順序、預設需求、配色或錯誤提示，先看 `frontend/static/`；詳細分工與測試指令見 [前端說明](../frontend/README.md)。
 要改按下按鈕後的同步、核准或匯出規則，接著看 `backend/services/study.py`。
 
 ## 8. Node AI Bridge
@@ -273,7 +278,7 @@ NTPU AI 專用 Profile 目前位於 `%LOCALAPPDATA%/NTPU HomeworkInOne/p0/browse
 
 | 要修改的功能 | 建議閱讀順序 |
 | --- | --- |
-| 畫面、按鈕、欄位、提示文字 | frontend/gradio_app.py |
+| 畫面、按鈕、欄位、提示文字 | frontend/static/app.js、workflow.js、ui.js |
 | 作業敘述／活動指示漏抓 | study.py 的 sync_assignments → documents.py 的 assignment_text → tests/test_assignment_text.py |
 | PDF／Word／CSV 解析 | documents.py → p0/moodle.py 的 inspect_document → tests/test_mvp.py、tests/test_p0.py |
 | Moodle 登入、Token、下載限制 | p0/moodle.py → study.py 的同步／下載流程 |
@@ -282,7 +287,7 @@ NTPU AI 專用 Profile 目前位於 `%LOCALAPPDATA%/NTPU HomeworkInOne/p0/browse
 | Docker context、隔離與 Windows 長路徑 | agent/runner.py → scripts/setup_runner.py → tests/test_runner_config.py、tests/test_p3_sandbox.py |
 | AI 連線、取消、逾時 | p0/ai.py → ntpu-ai-bridge/src/p0.cjs → vendor/src/browser.js |
 | 核准規則、來源快照、重複請求 | study.py 的 create_task、approve |
-| 資料保存、歷史任務 | models/store.py → study.py → frontend/gradio_app.py |
+| 資料保存、歷史任務 | models/store.py → study.py → frontend/static/workflow.js、app.js |
 | PDF 字型、版面、表格、頁碼 | services/reports.py → scripts/setup_font.py → docs/font.lock.json |
 | 對外提供新 HTTP API | api/routes.py → services/study.py → docs/API.md |
 | 安裝依賴、CI、來源更新 | pyproject.toml、package.json → setup_dev.ps1、ci.yml → THIRD_PARTY_NOTICES.md |

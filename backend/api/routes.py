@@ -7,6 +7,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.agent.contracts import REGISTRY, AgentOptions
+from backend.agent.engine import RESUMABLE, resume_unavailable
+from backend.p0.ai import connection_status
 from backend.services.exports import export_extra
 from backend.services.study import StudyError, error_code
 
@@ -202,7 +204,21 @@ def routes(service):
 
     @api.post("/connections/ntpu-ai/start")
     def ai_login():
-        return success(service.ai.rpc("open_login"))
+        if not service.ai_lock.acquire(blocking=False):
+            raise StudyError("AI_BUSY")
+        try:
+            return success(service.ai.rpc("open_login"))
+        finally:
+            service.ai_lock.release()
+
+    @api.post("/connections/ntpu-ai/restore")
+    def ai_restore():
+        if not service.ai_lock.acquire(blocking=False):
+            raise StudyError("AI_BUSY")
+        try:
+            return success(connection_status(service.ai))
+        finally:
+            service.ai_lock.release()
 
     @api.delete("/connections/{provider}")
     def logout(provider: str):
@@ -254,7 +270,10 @@ def routes(service):
 
     @api.get("/tasks/{task_id}")
     def task(task_id: str):
-        return success(service.get("task", task_id))
+        value = service.get("task", task_id)
+        if value["status"] in RESUMABLE:
+            value = {**value, "resume_unavailable": resume_unavailable(value)}
+        return success(value)
 
     @api.post("/tasks/{task_id}/approve", status_code=202)
     def approve(task_id: str, body: ApproveRequest):

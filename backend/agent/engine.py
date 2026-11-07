@@ -36,6 +36,38 @@ from backend.services.documents import parse
 RETRYABLE = {"NETWORK_UNAVAILABLE", "AI_INVALID_REPORT_SCHEMA"}
 AUTH_ERRORS = {"AI_AUTH_REQUIRED", "AUTH_REQUIRED", "SESSION_EXPIRED", "SSO_EXPIRED"}
 STOP_ERRORS = AUTH_ERRORS | {"RATE_LIMITED", "PERMISSION_DENIED", "FORBIDDEN"}
+RESUMABLE = {"partial", "cancelled", "blocked_auth", "failed"}
+RESTART_ERRORS = {
+    "TASK_DEADLINE_EXCEEDED", "RETRY_BUDGET_EXCEEDED", "STEP_BUDGET_EXCEEDED",
+    "REQUEST_BUDGET_EXCEEDED", "PROMPT_BUDGET_EXCEEDED", "ASSET_CHANGED", "PLAN_CHANGED",
+}
+
+
+def resume_unavailable(task):
+    """Describe a known checkpoint limit without attempting any external call."""
+    plan = task.get("plan")
+    if task["status"] not in RESUMABLE or not plan:
+        return "TASK_NOT_RESUMABLE"
+    if task.get("error") in RESTART_ERRORS:
+        return task["error"]
+    if task.get("deadline_at") and time.time() > task["deadline_at"]:
+        return "TASK_DEADLINE_EXCEEDED"
+
+    checkpoint, limits = task["checkpoint"], plan["limits"]
+    cursor = checkpoint["cursor"]
+    if cursor >= len(plan["steps"]):
+        return None  # Only verification remains.
+    step = plan["steps"][cursor]
+    if checkpoint["attempts"].get(step["id"], 0) >= 1 + limits["max_retries"]:
+        return "RETRY_BUDGET_EXCEEDED"
+    if checkpoint["steps_used"] >= limits["max_steps"]:
+        return "STEP_BUDGET_EXCEEDED"
+    if step["tool"] in {"web_research", "generate_report", "plan_completion"}:
+        if checkpoint["requests_used"] >= limits["max_requests"]:
+            return "REQUEST_BUDGET_EXCEEDED"
+        if step["tool"] != "web_research" and checkpoint["prompt_chars_used"] >= limits["max_prompt_chars"]:
+            return "PROMPT_BUDGET_EXCEEDED"
+    return None
 
 
 class GraphState(TypedDict):
@@ -310,8 +342,12 @@ class AgentEngine:
 
     def research(self, user, task, query):
         from backend.integrations.research import PublicResearch, normalize_query
+        request = task['request']
+        options = request['agent']
+        if (request['mode'] == 'complete_assignment' or not request['allow_external_research']
+                or query != options['research_query']):
+            fail('TOOL_APPROVAL_REQUIRED')
         query = normalize_query(query)
-        options = task['request']['agent']
         provider = options.get('research_provider', 'crossref')
         full_text = options.get('research_full_text', False)
         timeout = min(task['plan']['limits']['tool_timeout'], task['deadline_at'] - time.time(), 25)
@@ -524,7 +560,7 @@ class AgentEngine:
     def resume(self, task_id, snapshot_hash, high=False, external=False):
         with self.study.lock:
             task = self.study.get("task", task_id)
-            if not task.get("plan") or task["status"] not in {"partial", "cancelled", "blocked_auth", "failed"}:
+            if not task.get("plan") or task["status"] not in RESUMABLE:
                 fail("TASK_NOT_RESUMABLE")
             if task["request_sha256"] != snapshot_hash:
                 fail("APPROVAL_SNAPSHOT_MISMATCH")

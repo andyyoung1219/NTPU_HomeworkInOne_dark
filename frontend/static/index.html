@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="集中管理臺北大學課程、作業與學習資料的本機工作台。">
+  <title>NTPU 學習工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23b8e99b'/%3E%3Cpath d='M11 28V12h4l10 16h4V12' fill='none' stroke='%23151915' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">跳至主要內容</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主選單">
+      <a class="brand" href="#home"><span class="brand-mark">N<span>↗</span></span><span>NTPU<span class="brand-caption">學習工作台</span></span></a>
+      <div class="workspace-label">我的學習空間 <span>LOCAL</span></div>
+      <nav class="main-nav">
+        <a href="#home" data-page="home"><span data-icon="grid"></span>學習總覽</a>
+        <a href="#courses" data-page="courses"><span data-icon="book"></span>我的課程</a>
+        <a href="#work" data-page="work"><span data-icon="edit"></span>作業工作台</a>
+        <a href="#hub" data-page="hub"><span data-icon="layers"></span>學習資料</a>
+        <a href="#history" data-page="history"><span data-icon="clock"></span>歷史任務</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-note"><span class="status-dot"></span>資料保存在這台電腦<p>讓學習有條理，讓專注更簡單。</p></div>
+        <button class="profile" data-action="connections"><span class="avatar">N</span><span>我的連線<small id="connection-summary">管理學校帳號與 AI</small></span><span data-icon="settings"></span></button>
+        <p class="disclaimer">非臺北大學官方產品</p>
+      </div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <span class="breadcrumb">我的學習空間 <span>/</span> <strong id="page-label">學習總覽</strong></span>
+        <div class="top-actions"><button class="search-trigger" data-action="search" aria-label="搜尋課程與文件"><span data-icon="search"></span><span>搜尋課程與文件</span><kbd>/</kbd></button><button class="icon-button" data-action="connections" aria-label="開啟連線管理"><span data-icon="settings"></span></button></div>
+      </header>
+      <main id="content" tabindex="-1" aria-busy="true"><div class="loading-state"><span class="spinner"></span><p>正在整理你的學習空間…</p></div></main>
+      <footer class="main-footer"><span>NTPU HomeworkInOne</span><span>專注當下，一步一步完成。</span></footer>
+    </div>
+  </div>
+  <div id="notifications" class="notifications" role="status" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="connections-dialog" aria-labelledby="connections-title">
+    <div class="dialog-heading"><div><p class="eyebrow">CONNECTIONS</p><h2 id="connections-title">連線管理</h2></div><button class="icon-button" data-action="close-dialog" aria-label="關閉連線管理">✕</button></div>
+    <p class="muted">連結學校帳號，讓課程、作業與 AI 準備就緒。</p>
+    <div id="connection-states" class="connection-states">開啟後可檢查連線。</div>
+    <form id="login-form">
+      <label>選擇服務<select id="provider"><option value="moodle">Moodle 課程平台</option><option value="sis">校務系統</option><option value="ntpu-ai">NTPU AI</option></select></label>
+      <div id="credential-fields"><label>學校帳號<input id="username" autocomplete="username" maxlength="200" required placeholder="輸入本人學校帳號"></label><label>密碼<span class="password-field"><input id="password" type="password" autocomplete="current-password" maxlength="300" required><button type="button" data-action="toggle-password" aria-label="顯示密碼" aria-pressed="false">顯示</button></span></label><button type="submit" class="button primary full">登入並連結</button></div>
+      <div id="ai-fields" hidden><p class="notice">在專用瀏覽器完成登入後，關閉登入視窗，再檢查連線。</p><button type="button" class="button primary full" data-action="ai-login">開啟 NTPU AI 登入視窗 ↗</button></div>
+    </form>
+    <div class="button-row"><button class="button" data-action="check-connections">檢查連線</button><button class="button" data-action="restore-connection">恢復所選連線</button><button class="button quiet" data-action="logout">登出</button></div>
+    <p id="connection-message" class="notice" role="status" hidden></p>
+    <details class="maintenance"><summary>本機資料與診斷</summary><a class="text-link" href="/api/maintenance/diagnostics" download>下載去識別化診斷 ↗</a><button class="button" data-action="preview-delete">預覽目前帳號清除範圍</button><div id="delete-preview" hidden></div></details>
+  </dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><div class="dialog-heading"><h2 id="confirm-title">確認操作</h2><button class="icon-button" data-action="close-dialog" aria-label="取消">✕</button></div><p id="confirm-description" class="pre-wrap"></p><div class="button-row end"><button class="button" data-action="close-dialog">取消</button><button id="confirm-accept" class="button primary">確認</button></div></dialog>
+</body>
+</html>

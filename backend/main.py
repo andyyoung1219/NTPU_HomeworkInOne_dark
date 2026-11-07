@@ -1,23 +1,20 @@
 import atexit
-import os
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
-os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-
-import gradio as gr
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.api.routes import routes, safe_exception
 from backend.p0.moodle import probe
 from backend.services.study import StudyError, StudyService, error_code
-from frontend.gradio_app import CSS, build_ui
 
 PORT = 8766
 ORIGIN = f"http://127.0.0.1:{PORT}"
+FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "static"
 
 
 def create_app(service=None, key=None):
@@ -67,16 +64,22 @@ def create_app(service=None, key=None):
     def unlock(provided: str):
         if not secrets.compare_digest(key, provided):
             return JSONResponse({"error": "INVALID_KEY"}, status_code=401)
-        response = RedirectResponse("/?__theme=dark", status_code=303)
+        response = RedirectResponse("/", status_code=303)
         response.set_cookie("study_session", key, httponly=True, samesite="strict")
         return response
 
     app.include_router(routes(service), prefix="/api")
-    return gr.mount_gradio_app(app, build_ui(service), path="/", show_error=False,
-        allowed_paths=[], blocked_paths=[str(service.root)], footer_links=[], run_history=False,
-        enable_monitoring=False, css=CSS,
-        theme=gr.themes.Soft(primary_hue="emerald", neutral_hue="slate",
-            font=["Microsoft JhengHei", "Arial", "sans-serif"], font_mono=["Consolas", "monospace"]))
+    app.mount("/static", StaticFiles(directory=FRONTEND), name="static")
+
+    @app.get("/")
+    def index():
+        return FileResponse(FRONTEND / "index.html", headers={
+            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        })
+
+    return app
 
 
 if __name__ == "__main__":

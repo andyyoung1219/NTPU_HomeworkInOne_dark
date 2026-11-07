@@ -70,6 +70,24 @@ APPLICATION_CAPABILITIES = {
     "missing_byline_or_filename_identity": "Omit unknown identity fields and add a user action; do not invent identity or block report content.",
 }
 
+UCI_DATASET_REFERENCE = re.compile(
+    r"(?:\bhttps://archive\.ics\.uci\.edu/dataset/|"
+    r"\bUCI[ \t]+(?:dataset(?:[ \t]+id)?|資料集(?:[ \t]*(?:id|編號))?)[ \t]*[:：#]?[ \t]*)"
+    r"([1-9][0-9]{0,5})(?=$|[/\s.,，。;；)）])",
+    re.IGNORECASE,
+)
+LITERATURE_ACTION = (
+    "Find and verify public literature separately, then add the citations and findings to the report."
+)
+UNVERIFIED_UCI_ACTION = (
+    "Confirm the public UCI dataset ID and provide the data before treating it as a source."
+)
+
+
+def explicit_uci_ids(task):
+    description = task["assignment_snapshot"].get("description", "")
+    return sorted({int(ref) for ref in UCI_DATASET_REFERENCE.findall(description) if int(ref) <= 100000})
+
 
 def add_actions(task, actions):
     pending = task.setdefault("required_actions", [])
@@ -110,6 +128,8 @@ class CompletionPlan(BaseModel):
     dataset_id: Literal["wine-red", "wine-white", "iris", "heart-disease", "breast-cancer", "abalone"] | None = None
     uci_dataset_id: int | None = Field(default=None, ge=1, le=100000)
     needs_execution: bool = False
+    literature_required: bool = False
+    # Accept older model responses but discard their query text after validation.
     research_query: str = Field(default="", max_length=300)
     blockers: list[str] = Field(default_factory=list, max_length=20)
 
@@ -133,8 +153,7 @@ def create_completion(study, assignment_id, idempotency_key):
         # One server-owned envelope covers all completion stages and at most two
         # retries per failed stage. Manual task limits and defaults are unchanged.
         options.update(max_retries=2, max_steps=40, max_requests=18, max_prompt_chars=300000,
-                       tool_timeout=120, ai_timeout=180, deadline_seconds=900,
-                       research_provider="combined", research_full_text=True)
+                       tool_timeout=120, ai_timeout=180, deadline_seconds=900)
         request = {"assignment_id": assignment_id, "selected_asset_ids": assignment["asset_ids"],
                    "mode": "complete_assignment", "instruction": INSTRUCTION, "excerpt": "",
                    "requirements": "", "agent": options, "material_chunks": [],
@@ -297,16 +316,16 @@ def plan(engine, user, task):
         return task["completion_plan"]
     payload = {"assignment": task["title"], "instruction": INSTRUCTION,
                "inputs": task["completion_inputs"], "dataset_catalog": DATASETS,
+               "explicit_uci_dataset_ids": explicit_uci_ids(task),
                "application_capabilities": APPLICATION_CAPABILITIES,
                "sandbox": "Python standard library only; no network or package installation"}
     instruction = (
         INSTRUCTION + "核准的附件圖像是來源證據；依可見內容辨識圖表與公式，公式以 LaTeX 表達，模糊或不確定部分列待核對。規劃並自主決定本次作業的具體成果。回覆 "
         '{"objective":"具體主題與方法","deliverable_type":"proposal|report|code",'
         '"dataset_id":"目錄識別碼或 null","uci_dataset_id":null,"needs_execution":false,'
-        '"research_query":"可選公開主題","blockers":[]}。'
-        "research_query 可為符合題目的具體公開研究查詢（最多300字元）或 DOI；不可含帳密、姓名、學號或私人成績。"
-        "公開文獻工具提供 Crossref、Europe PMC 摘要及可用開放全文節錄；不得把僅 metadata 視為已讀全文。"
-        "uci_dataset_id 可填題目明示的 UCI dataset ID；不可猜造，不提供時為 null，與 dataset_id 擇一。"
+        '"literature_required":false,"blockers":[]}。'
+        "題目若需要另外查證公開文獻，設 literature_required 為 true，系統會將查證列入使用者待辦。"
+        "uci_dataset_id 限 explicit_uci_dataset_ids 所列的題目明示編號，不使用時為 null，與 dataset_id 擇一。"
         "題目允許自行選資料時，優先用作業附件；需要公開資料才選適用的目錄資料集。"
         "題目指定其他資料集時不能偷換成目錄資料。缺少私人資料或工具不支援時列出精確 blockers，"
         "這些會成為使用者待辦，仍須規劃並完成其他可完成部分。"
@@ -320,6 +339,8 @@ def plan(engine, user, task):
         fail("AI_INVALID_COMPLETION_PLAN")
     if result["deliverable_type"] == "code":
         result["needs_execution"] = True
+    legacy_query = result.pop("research_query")
+    result["literature_required"] = result["literature_required"] or bool(legacy_query.strip())
     task["completion_plan"] = result
     if result["blockers"]:
         add_actions(task, result["blockers"])
@@ -363,10 +384,14 @@ def profile_csv(data, delimiter):
 
 def gather(engine, user, task):
     result = task.setdefault("completion_data", {"datasets": [], "research": {}})
-    selected = task["completion_plan"]["dataset_id"]
-    uci_id = task["completion_plan"].get("uci_dataset_id")
+    plan = task["completion_plan"]
+    selected = plan["dataset_id"]
+    uci_id = plan.get("uci_dataset_id")
     if selected and uci_id:
         fail("AI_INVALID_COMPLETION_PLAN")
+    if uci_id and not result["datasets"] and uci_id not in explicit_uci_ids(task):
+        add_actions(task, [UNVERIFIED_UCI_ACTION])
+        uci_id = None
     if (selected or uci_id) and not result["datasets"]:
         if selected:
             source = DATASETS[selected]
@@ -421,9 +446,12 @@ def gather(engine, user, task):
                 "sandbox_path": "/input/" + path.name, "profile": profile_csv(data, delimiter)})
         result["attachment_profiles"] = profiles
         engine.save(user, task)
-    query = task["completion_plan"]["research_query"]
-    if query and not result["research"]:
-        result["research"] = engine.research(user, task, query)
+    # Older checkpoints can carry a free-text query. The direct-mode approval
+    # covers dataset selection, while exact literature queries require guided approval.
+    legacy_query = plan.pop("research_query", "")
+    if (plan.get("literature_required") or legacy_query.strip()) and not result["research"]:
+        plan["literature_required"] = True
+        add_actions(task, [LITERATURE_ACTION])
         engine.save(user, task)
     return result
 

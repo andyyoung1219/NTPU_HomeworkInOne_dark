@@ -134,12 +134,12 @@ def test_wizard_guards_preserve_work_until_inputs_are_ready(service):
 
 @pytest.mark.parametrize("case", ["assignment", "no_assignments", "no_courses", "other_user"])
 def test_wizard_defaults_to_first_course_and_assignment_or_empty(service, case):
-    # Insert the formerly preferred names before newer first entries. Neither
+    # Insert alternate names before the expected first entries. Neither
     # label should override the order returned for the current account.
     service.store.save_many(service.user, [
-        ("course", "later", {"id": "later", "name": "人工智慧代理人原理及實務"}),
+        ("course", "later", {"id": "later", "name": "測試課程乙"}),
         ("course", "first", {"id": "first", "name": "資料結構"}),
-        ("assignment", "later", {"id": "later", "course_id": "first", "title": "指定作業1",
+        ("assignment", "later", {"id": "later", "course_id": "first", "title": "測試作業乙",
                                     "description": "另一份作業", "asset_ids": []}),
         ("assignment", "first", {"id": "first", "course_id": "first", "title": "排序練習",
                                     "description": "排序題目", "asset_ids": []}),
