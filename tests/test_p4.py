@@ -108,6 +108,7 @@ def test_progress_restart_preserves_edits_and_clears_approval(service):
     value = {"course_id": "1", "assignment_id": "2", "selected_asset_ids": ["a" * 24],
              "mode": "code_solution", "instruction": "請保留修改", "excerpt": "自訂節錄",
              "requirements": "自訂要求", "task_id": task["id"], "editor": "# 尚未按保存的修改",
+             "research_query": "10.1234/example", "research_provider": "europepmc", "research_full_text": True,
              "page": "review", "reviewed": True, "data_transfer_approved": True}
     service.learning.save_progress(value)
     restarted = StudyService(service.root, FakeAI())
@@ -115,6 +116,9 @@ def test_progress_restart_preserves_edits_and_clears_approval(service):
         restored = restarted.learning.progress()
         assert restored["editor"] == value["editor"]
         assert restored["excerpt"] == value["excerpt"]
+        assert restored["research_query"] == value["research_query"]
+        assert restored["research_provider"] == value["research_provider"]
+        assert restored["research_full_text"] is True
         assert restored["page"] == "review"
         assert not restored["reviewed"] and not restored["data_transfer_approved"]
         assert restarted.ai.calls == []

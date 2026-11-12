@@ -7,6 +7,7 @@ const guidedModes = {
   report_draft: '產生報告草稿',
   code_solution: '程式解題',
 };
+const researchProviders = {crossref:'Crossref',europepmc:'Europe PMC',combined:'Crossref 與 Europe PMC'};
 const active = task => ['running','planning','exporting'].includes(task?.status);
 const finished = task => Boolean(task?.draft && ['waiting_review','completed'].includes(task.status));
 const recoverable = task => ['partial','failed','cancelled','blocked_auth'].includes(task?.status);
@@ -29,7 +30,25 @@ const interruptionMessages = {
   AI_AUTH_REQUIRED: '登入 NTPU AI 後再繼續執行。',
   AI_CONNECTION_PENDING: 'NTPU AI 連線尚未就緒，稍後可再試。',
 };
-const defaults = () => ({course_id:null,assignment_id:null,selected_asset_ids:[],task_id:null,page:'select',mode:'report_draft',instruction:'',excerpt:'',requirements:'',editor:''});
+const defaults = () => ({
+  course_id:null,assignment_id:null,selected_asset_ids:[],task_id:null,page:'select',mode:'report_draft',
+  instruction:'',excerpt:'',requirements:'',editor:'',
+  research_query:'',research_provider:'crossref',research_full_text:false,
+});
+
+function researchSettings(request) {
+  if (request.mode === 'complete_assignment' || !request.allow_external_research) return {};
+  const {research_query = '', research_provider = 'crossref', research_full_text = false} = request.agent || {};
+  return {research_query,research_provider,research_full_text};
+}
+
+function researchScope(request) {
+  if (!request.allow_external_research) return '';
+  if (request.mode === 'complete_assignment') return '取得公開資料集';
+  const {research_query,research_provider,research_full_text} = researchSettings(request);
+  const excerpts = research_provider !== 'crossref' && research_full_text ? '及可取得的 Europe PMC 開放全文節錄' : '';
+  return `向 ${researchProviders[research_provider]} 查詢「${research_query.trim()}」，取得書目與摘要${excerpts}`;
+}
 
 export function createWorkflow(ctx) {
   let value = defaults(), assignment = null, assignments = [], task = null;
@@ -75,7 +94,8 @@ export function createWorkflow(ctx) {
         task = await ctx.api(endpoint(''));
         runStyle = task.request.mode === 'complete_assignment' ? 'complete' : 'guided';
         visual = Boolean(task.request.allow_visual_transfer);
-        if (active(task) || task.status === 'waiting_approval') {
+        if (saved.research_query === undefined) Object.assign(value,researchSettings(task.request));
+        if (active(task) || (task.status === 'waiting_approval' && saved.page !== 'sources')) {
           value.page = 'generate';
         } else if (runStyle === 'complete' && value.page === 'sources') {
           value.page = finished(task) ? 'review' : 'generate';
@@ -117,7 +137,7 @@ export function createWorkflow(ctx) {
     value = {...defaults(),course_id:a.course_id,assignment_id:a.id,task_id:next.id,
       selected_asset_ids:selected,mode:Object.hasOwn(guidedModes, request.mode) ? request.mode : 'report_draft',
       instruction:request.instruction || '',excerpt:request.excerpt || '',requirements:request.requirements || '',editor:next.draft || '',
-      page:finished(next) ? 'review' : 'generate'};
+      page:finished(next) ? 'review' : 'generate',...researchSettings(request)};
     visual = Boolean(request.allow_visual_transfer);
     if (finished(next) && next.error) outputError = exportMessage(next.error);
     if (active(next)) watch();
@@ -163,10 +183,18 @@ export function createWorkflow(ctx) {
         <label>題目文字與節錄<textarea id="work-excerpt" rows="6" maxlength="24000" placeholder="貼上題目或讀取附件…">${esc(value.excerpt)}</textarea></label>
         <label>題目要求<textarea id="work-requirements" rows="3" maxlength="6000">${esc(value.requirements)}</textarea></label>
       </details>
-      <details><summary>補充設定（選填）</summary>
+      <details ${value.research_query ? 'open' : ''}><summary>補充設定（選填）</summary>
         <label>處理方式<select id="work-mode">${Object.entries(guidedModes).map(([k,v]) => option(k,v,value.mode)).join('')}</select></label>
         <label>補充說明<textarea id="work-instruction" maxlength="4000" rows="3">${esc(value.instruction)}</textarea></label>
         <label class="check"><input id="work-visual" type="checkbox" ${visual ? 'checked' : ''}><span>允許傳送附件中的圖表與公式影像</span></label>
+        <details ${value.research_query ? 'open' : ''}><summary>公開文獻查詢</summary>
+          <label>公開主題或 DOI<input id="work-research-query" type="text" maxlength="300" value="${esc(value.research_query)}"></label>
+          <label>查詢來源<select id="work-research-provider">${Object.entries(researchProviders).map(([key,label]) => option(key,label,value.research_provider)).join('')}</select></label>
+          <div id="work-research-full-text-option" ${value.research_provider === 'crossref' ? 'hidden' : ''}>
+            <label class="check"><input id="work-research-full-text" type="checkbox" ${value.research_full_text ? 'checked' : ''}><span>同時取得可用的 Europe PMC 開放全文節錄</span></label>
+          </div>
+          <p class="muted">填寫查詢後，開始執行時會先請你確認要送往所選來源的內容。</p>
+        </details>
       </details>
       <label class="check"><input id="work-approve" type="checkbox" ${approved ? 'checked' : ''}><span>我已核對題目與選定資料，同意傳送至 NTPU AI</span></label>
       <div class="button-row between">${button('返回選作業','work-prev')}${button('開始執行','work-start','primary',!approved || !hasExcerpt ? 'disabled' : '')}</div>`;
@@ -195,6 +223,7 @@ export function createWorkflow(ctx) {
     return `<div class="work-primary-status">
       <h2>${esc(reconnect ? '需要重新連線' : waiting ? '等待確認' : task.status === 'cancelled' ? '已停止執行' : '作業執行中斷')}</h2>
       <p class="work-status-meta">${steps.length ? `已完成 ${cursor}／${steps.length} 步。 ` : ''}${esc(reason)}</p>
+      ${waiting && task.request.allow_external_research ? `<p class="work-mode-note">${esc(researchScope(task.request))}。</p>` : ''}
       ${task.error && task.error !== task.resume_unavailable && task.error !== 'CANCELLED'
         ? `<p class="work-mode-note">${esc(interruptionMessages[task.error] || errorText({code:task.error}))}</p>` : ''}
     </div>
@@ -202,7 +231,8 @@ export function createWorkflow(ctx) {
       ${recoveryError ? `<p class="notice warning" role="alert">${esc(recoveryError)}</p>` : ''}
       <div class="button-row">
         ${resume ? button(waiting ? '確認並開始' : '從中斷點繼續','work-resume','primary') : ''}
-        ${button('重新執行','work-regenerate',resume ? '' : 'primary')}
+        ${waiting && task.request.allow_external_research && runStyle === 'guided'
+          ? button('返回修改資料','work-next') : button('重新執行','work-regenerate',resume ? '' : 'primary')}
         ${reconnect ? button('登入 NTPU AI','connections','small','data-provider="ntpu-ai"') : ''}
       </div>
       ${task.draft ? `<div class="button-row">${button('查看已保留的草稿','work-review','small')}</div>` : ''}
@@ -213,11 +243,27 @@ export function createWorkflow(ctx) {
     const kinds = [...(task.pdf ? ['pdf','manifest'] : []),...(task.draft ? ['markdown'] : []),...Object.keys(task.exports || {})];
     return kinds.map(k => `<a class="button small" href="/api/artifacts/${id(task.id)}/download?kind=${id(k)}" download>${icon('download')} 下載 ${formats[k] || esc(k)}</a>`).join('') + Object.keys(task.generated_files || {}).map(name => `<a class="button small" href="/api/tasks/${id(task.id)}/artifacts/${id(name)}" download>${icon('download')} ${esc(name)}</a>`).join('');
   }
+  function researchResults() {
+    const step = task?.plan?.steps?.find(step => step.tool === 'web_research');
+    const result = step && task.tool_results?.[step.id];
+    if (!result) return '';
+    const sources = result.sources || [];
+    const issues = (result.issues || []).map(({provider,code}) => `${provider}：${errorText({code})}`).join('、');
+    return `<details><summary>查得的公開文獻（${sources.length} 筆）</summary>
+      ${issues ? `<p class="notice warning">${esc(issues)}</p>` : ''}
+      ${sources.length ? `<ul>${sources.map(source => {
+        const scope = source.content_scope === 'open_access_full_text_excerpt' ? '開放全文節錄'
+          : source.abstract ? '書目與摘要' : '書目';
+        return `<li class="pre-wrap">${externalLink(source.url,source.title) || esc(source.title)} <small class="muted">${esc(source.provider)} · ${scope}${source.doi ? ` · DOI ${esc(source.doi)}` : ''}</small></li>`;
+      }).join('')}</ul>` : '<p class="muted">這次查詢沒有取得文獻。</p>'}
+    </details>`;
+  }
   function reviewView() {
     if (recoverable(task)) {
       return `<h2>已保留的部分草稿</h2>
         <p>作業尚未完成。可以先下載草稿，再返回執行狀態。</p>
         <article class="markdown-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
+        ${researchResults()}
         <div class="work-export-list">${downloads()}</div>
         <div class="button-row">${button('返回執行狀態','work-progress','primary')}</div>`;
     }
@@ -232,6 +278,7 @@ export function createWorkflow(ctx) {
       <p>核對成果後即可匯出。需要修正時，可直接編輯草稿。</p>
       ${actions.length ? `<div class="notice warning"><strong>尚待處理</strong><ul>${actions.map(a => `<li>${esc(a === task?.error ? errorText({code:a}) : a)}</li>`).join('')}</ul></div>` : ''}
       <article class="markdown-preview" id="draft-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
+      ${researchResults()}
       <details class="work-editor-details" ${dirty ? 'open' : ''}><summary>編輯草稿</summary>
         <label>草稿編輯 · Markdown<textarea id="work-editor" rows="10" maxlength="80000" spellcheck="false">${esc(value.editor)}</textarea></label>
         <div class="button-row">${button('保存修改','work-save','small')}<span class="work-status-meta" id="draft-save-state">${dirty ? '修改將在匯出時一併保存' : '草稿已保存'}</span></div>
@@ -309,6 +356,10 @@ export function createWorkflow(ctx) {
       throw new Error('請先核對內容並核准本次傳送。');
     }
     if (runStyle === 'guided' && !value.excerpt.trim()) throw new Error('請先讀取題目文字或附件內容。');
+    const query = value.research_query.trim();
+    if (runStyle === 'guided' && query && [...query].some(character => character.charCodeAt(0) < 32)) {
+      throw new Error('請將公開主題或 DOI 填在同一行。');
+    }
     await flush();
     if (regenerate && dirty && value.editor.trim()) {
       task = await ctx.api(endpoint('/draft'),'PUT',{markdown:value.editor,reviewed:false});
@@ -319,6 +370,15 @@ export function createWorkflow(ctx) {
       instruction:value.instruction,excerpt:value.excerpt,requirements:value.requirements,
       data_transfer_approved:true,allow_visual_transfer:visual,
     };
+    if (runStyle === 'guided' && query) {
+      body.allow_external_research = true;
+      body.agent = {
+        research_query:query,
+        research_provider:value.research_provider,
+        research_full_text:value.research_provider !== 'crossref' && value.research_full_text,
+        max_requests:5, // Two provider searches, up to two excerpts, and one AI response.
+      };
+    }
     const path = runStyle === 'complete' ? `/assignments/${id(value.assignment_id)}/complete` : '/tasks';
     const signature = JSON.stringify([path,body]);
     // Reuse the key after a lost HTTP response, so retrying cannot create a duplicate job.
@@ -369,7 +429,7 @@ export function createWorkflow(ctx) {
     const request = task.request;
     const waiting = task.status === 'waiting_approval';
     const extras = [
-      request.allow_external_research ? (request.mode === 'complete_assignment' ? '取得公開資料集' : '送出原先核准的公開查詢') : '',
+      researchScope(request),
       request.allow_code_execution ? '在隔離環境執行程式' : '',
     ].filter(Boolean);
     const description = (waiting ? '依原任務設定執行並傳送資料至 NTPU AI。' : '沿用已完成的步驟，必要時再次傳送資料至 NTPU AI。') +
@@ -405,7 +465,7 @@ export function createWorkflow(ctx) {
     }
     const scope = runStyle === 'complete'
       ? '會重新讀取題目與附件並送至 NTPU AI，視需要取得公開資料集或在隔離環境執行程式。'
-      : '會用目前確認的資料重新傳送至 NTPU AI。';
+      : '會用目前確認的資料重新傳送至 NTPU AI。' + (value.research_query.trim() ? '公開文獻查詢會另行確認。' : '');
     const preservation = dirty ? '會先保存這次修改。' : '';
     if (!await ctx.confirm('重新執行這份作業？',`${scope} ${preservation}舊草稿可從歷史任務開啟。`,'同意並重新執行')) return;
     try {
@@ -466,7 +526,8 @@ export function createWorkflow(ctx) {
     return true;
   }
   function input(el) {
-    const fields = {'work-excerpt':'excerpt','work-requirements':'requirements','work-instruction':'instruction','work-editor':'editor'};
+    const fields = {'work-excerpt':'excerpt','work-requirements':'requirements','work-instruction':'instruction',
+      'work-editor':'editor','work-research-query':'research_query'};
     const field = fields[el.id]; if (!field) return;
     value[field] = el.value; clearApproval();
     if (field === 'editor') {
@@ -491,14 +552,23 @@ export function createWorkflow(ctx) {
       repaint();
     } else if (el.name === 'run-style') { runStyle = el.value; clearApproval(); repaint(); }
     else if (el.dataset.asset) { value.selected_asset_ids = [...document.querySelectorAll('[data-asset]:checked')].map(e => e.dataset.asset); value.excerpt = ''; value.requirements = ''; clearApproval(); await save(); repaint(); }
-    else if (el.id === 'work-mode' || el.id === 'work-visual') {
-      if (el.id === 'work-mode') { value.mode = el.value; await save(); }
-      else visual = el.checked;
+    else if (['work-mode','work-visual','work-research-provider','work-research-full-text'].includes(el.id)) {
+      if (el.id === 'work-mode') value.mode = el.value;
+      if (el.id === 'work-visual') visual = el.checked;
+      if (el.id === 'work-research-provider') {
+        value.research_provider = el.value;
+        const fullText = document.querySelector('#work-research-full-text');
+        const fullTextOption = document.querySelector('#work-research-full-text-option');
+        fullTextOption.hidden = el.value === 'crossref';
+        if (fullTextOption.hidden) value.research_full_text = fullText.checked = false;
+      }
+      if (el.id === 'work-research-full-text') value.research_full_text = el.checked;
       approved = false;
       const checkbox = document.querySelector('#work-approve');
       const startButton = document.querySelector('[data-action="work-start"]');
       if (checkbox) checkbox.checked = false;
       if (startButton) startButton.disabled = true;
+      if (el.id !== 'work-visual') await save();
     }
     else if (el.id === 'work-approve') { approved = el.checked; const btn = document.querySelector('[data-action="work-start"]'); if (btn) btn.disabled = !approved || !value.excerpt.trim(); }
     else if (el.id === 'work-reviewed') { reviewed = el.checked; document.querySelectorAll('[data-action="work-export"]').forEach(btn => btn.disabled = !reviewed); }

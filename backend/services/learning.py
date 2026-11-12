@@ -249,12 +249,17 @@ class LearningCenter:
             mode = value.get("mode", "report_draft")
             if mode not in WORKFLOW_MODES:
                 fail("INVALID_MODE")
+            provider = value.get("research_provider", "crossref")
+            if provider not in {"crossref", "europepmc", "combined"}:
+                fail("AGENT_OPTIONS_INVALID")
             result = {"course_id": course_id, "assignment_id": assignment_id,
                       "selected_asset_ids": selected, "task_id": task_id, "mode": mode,
                       "page": value.get("page") if value.get("page") in STEPS else "select",
+                      "research_provider": provider,
+                      "research_full_text": provider != "crossref" and value.get("research_full_text") is True,
                       "saved_at": now()}
             for field, limit in (("instruction", 4000), ("excerpt", 24000),
-                                 ("requirements", 6000), ("editor", 80000)):
+                                 ("requirements", 6000), ("editor", 80000), ("research_query", 300)):
                 text = value.get(field) or ""
                 if not isinstance(text, str) or len(text) > limit:
                     fail("INPUT_SIZE_INVALID")

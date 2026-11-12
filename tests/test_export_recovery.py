@@ -58,6 +58,49 @@ def test_pdf_code_preserves_indentation_operators_and_literal_markup(tmp_path):
     assert validate_pdf(target)["passed"]
 
 
+def test_pdf_wide_table_repeats_headers_and_restores_portrait(service):
+    headers = [f"欄位{c:02}" for c in range(1, 13)]
+    rows = [[f"R{r:02}C{c:02}" for c in range(1, 13)] for r in range(1, 27)]
+    table = "\n".join("| " + " | ".join(row) + " |" for row in
+                      [headers, ["---"] * len(headers), *rows])
+    draft = f"# 實驗報告\n前言說明\n\n## 寬表結果\n\n{table}\n\n## 結論\n後續正文"
+    task = code_task(service)
+    service.save_draft(task["id"], draft, reviewed=True, accept_incomplete=True)
+    exported = service.export(task["id"])
+
+    with pymupdf.open(service.safe_path(exported["pdf"])) as pdf:
+        assert exported["qa"]["passed"] and len(pdf) >= 4
+        assert pdf[0].rect.width < pdf[0].rect.height
+        assert pdf[-1].rect.width < pdf[-1].rect.height
+        assert "前言說明" in pdf[0].get_text() and "後續正文" in pdf[-1].get_text()
+        assert "寬表結果" in pdf[1].get_text()
+        for page in pdf[1:-1]:
+            assert page.rect.width > page.rect.height
+            assert all(header in page.get_text() for header in headers)
+        text = "".join(page.get_text() for page in pdf)
+        assert all(text.count(cell) == 1 for row in rows for cell in row)
+        for number, page in enumerate(pdf, 1):
+            assert f"第 {number} 頁" in page.get_text()
+
+
+def test_pdf_table_over_twelve_columns_preserves_all_cells_and_row_labels(tmp_path):
+    target = tmp_path / "split-table.pdf"
+    headers = ["項目", *(f"欄位{c:02}" for c in range(2, 16))]
+    values = [f"值{c:02}" for c in range(2, 16)]
+    table = "\n".join("| " + " | ".join(row) + " |" for row in
+                      [headers, ["---"] * len(headers), ["樣本甲", *values], ["樣本乙", "保留"]])
+    result = render_pdf(f"\n## 分組寬表\n\n{table}\n\n", target)
+
+    with pymupdf.open(target) as pdf:
+        assert result["passed"] and len(pdf) == 1
+        assert pdf[0].rect.width > pdf[0].rect.height
+        text = pdf[0].get_text()
+        assert "分組寬表" in text
+        assert text.count("項目") == text.count("樣本甲") == text.count("樣本乙") == 2
+        assert "欄位 2 至 12" in text and "欄位 13 至 15" in text
+        assert all(text.count(value) == 1 for value in values)
+
+
 @pytest.mark.parametrize("docx_failed", [False, True])
 def test_pdf_failure_keeps_code_downloadable_and_zip_exports_available_files(service, monkeypatch, docx_failed):
     task = code_task(service)

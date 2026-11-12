@@ -4,7 +4,7 @@ import {createWorkflow} from '../static/workflow.js';
 
 const assignment = {id:'a1',course_id:'c1',title:'Test assignment',assets:[],description:'Compare methods.'};
 const draftTask = {id:'t1',assignment_id:'a1',title:'Test draft',status:'waiting_review',draft:'# Saved draft',request:{mode:'report_draft',excerpt:'source',selected_asset_ids:[]},exports:{docx:{path:'report.docx'}}};
-function harness(progress = null, overrides = {}) {
+function harness(progress = null, overrides = {}, confirm = async () => true) {
   const calls = [], notices = [], nodes = new Map();
   globalThis.document = {
     querySelector: selector => { if (!nodes.has(selector)) nodes.set(selector,{checked:false,innerHTML:'',textContent:'',disabled:false}); return nodes.get(selector); },
@@ -20,7 +20,7 @@ function harness(progress = null, overrides = {}) {
     if (path === '/tasks/t1/draft') return {...draftTask,draft:body.markdown,reviewed:body.reviewed};
     throw new Error('Unexpected call: ' + path);
   };
-  const flow = createWorkflow({api,notify:(...args) => notices.push(args),confirm:async () => true,courses:() => [{id:'c1',name:'Course'}],repaintWork:() => {}});
+  const flow = createWorkflow({api,notify:(...args) => notices.push(args),confirm,courses:() => [{id:'c1',name:'Course'}],repaintWork:() => {}});
   return {flow,calls,notices,nodes};
 }
 test('restoring progress keeps unsaved editor content and resets all approvals',async () => {
@@ -54,6 +54,63 @@ test('a lost create response retries the same idempotency key and preserves prio
   assert.equal(creates.length,2);
   assert.equal(creates[0].headers['Idempotency-Key'],creates[1].headers['Idempotency-Key']);
   assert.match(flow.html(),/# New draft/);
+  flow.reset();
+});
+
+test('guided literature lookup confirms the saved query and source before starting the task', async () => {
+  const progress = {course_id:'c1',assignment_id:'a1',page:'sources',excerpt:'source'};
+  const confirmations = [];
+  let accepted = false;
+  let pending;
+  const {flow,calls} = harness(progress,{
+    '/tasks': (_,body) => {
+      pending = {...draftTask,request:body,draft:'',status:'waiting_approval',request_sha256:'lookup-snapshot'};
+      return pending;
+    },
+    '/tasks/t1/approve': () => ({...pending,status:'running'}),
+  }, async (_,description) => {
+    confirmations.push(description);
+    return accepted;
+  });
+  await flow.load();
+  await flow.change({id:'work-approve',checked:true,dataset:{}});
+  flow.input({id:'work-research-query',value:'  10.1234/abc  '});
+  await flow.change({id:'work-research-provider',value:'combined',dataset:{}});
+  await flow.change({id:'work-research-full-text',checked:true,dataset:{}});
+  await assert.rejects(flow.action('work-start',{}),/先核對內容/);
+  await flow.change({id:'work-approve',checked:true,dataset:{}});
+  await flow.action('work-start',{});
+  const request = calls.find(call => call.path === '/tasks').body;
+  assert.equal(request.allow_external_research,true);
+  assert.deepEqual(request.agent,{
+    research_query:'10.1234/abc',research_provider:'combined',research_full_text:true,max_requests:5,
+  });
+  assert.match(flow.html(),/等待確認/);
+  assert.ok(!calls.some(call => call.path.endsWith('/approve')));
+  await flow.action('work-resume',{});
+  assert.match(confirmations[0],/Crossref 與 Europe PMC 查詢「10\.1234\/abc」.*開放全文節錄/);
+  assert.ok(!calls.some(call => call.path.endsWith('/approve')));
+  accepted = true;
+  await flow.action('work-resume',{});
+  assert.deepEqual(calls.find(call => call.path.endsWith('/approve')).body,{
+    request_sha256:'lookup-snapshot',code_execution_approved:false,external_research_approved:true,
+  });
+  flow.reset();
+});
+
+test('review displays verified literature sources and partial lookup failures', async () => {
+  const researched = {...draftTask,plan:{steps:[{id:'lookup',tool:'web_research'}]},tool_results:{lookup:{
+    sources:[{title:'A <review>',url:'https://doi.org/10.1234/abc',doi:'10.1234/abc',
+      provider:'Europe PMC',content_scope:'open_access_full_text_excerpt'}],
+    issues:[{provider:'Crossref',code:'RESEARCH_UNAVAILABLE'}],
+  }}};
+  const {flow} = harness(null,{'/tasks/t1': () => researched});
+  await flow.openTask('t1');
+  const html = flow.html();
+  assert.match(html,/查得的公開文獻（1 筆）/);
+  assert.match(html,/href="https:\/\/doi.org\/10\.1234\/abc"[^>]*>A &lt;review&gt;/);
+  assert.match(html,/Europe PMC · 開放全文節錄/);
+  assert.match(html,/Crossref：暫時無法取得文獻/);
   flow.reset();
 });
 test('parsed requirements preserve human-readable source identifiers',async () => {

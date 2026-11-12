@@ -11,11 +11,22 @@ from fontTools.ttLib import TTFont as FontToolsFont
 from fontTools.varLib.instancer import instantiateVariableFont
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Image, LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    Image,
+    LongTable,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    TableStyle,
+)
+from reportlab.platypus.doctemplate import LayoutError
 
 from backend.p0.evidence import ROOT
 from backend.p0.moodle import probe
@@ -23,6 +34,9 @@ from backend.p0.moodle import probe
 _font_lock = threading.Lock()
 _render_lock = threading.Lock()
 FONT_DIR = ROOT / ".local/fonts"
+PAGE_SIZES = {"portrait": A4, "landscape": landscape(A4)}
+SIDE_MARGIN, TOP_MARGIN, BOTTOM_MARGIN, FRAME_PADDING = 50, 46, 48, 6
+LANDSCAPE_COLUMNS = 12
 
 
 def prepare_font():
@@ -53,6 +67,32 @@ def render_pdf(markdown, output, images=None):
         return _render_pdf(markdown, output, images or {})
 
 
+def report_table(rows, columns, orientation, style):
+    width = PAGE_SIZES[orientation][0] - 2 * (SIDE_MARGIN + FRAME_PADDING)
+    content = [[Paragraph(clean_inline(row[c] if c < len(row) else ""), style)
+                for c in columns] for row in rows]
+    return LongTable(content, colWidths=[width / len(columns)] * len(columns), repeatRows=1,
+                     splitByRow=1, splitInRow=1, hAlign="LEFT", spaceAfter=10, style=TableStyle([
+                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8f2ef")),
+                         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c5d5d0")),
+                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                         ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                         ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                         ("TOPPADDING", (0, 0), (-1, -1), 6),
+                         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                     ]))
+
+
+def add_section(sections, orientation, flowables):
+    while flowables and isinstance(flowables[-1], Spacer):
+        flowables.pop()
+    if flowables:
+        if sections and sections[-1][0] == orientation:
+            sections[-1][1].extend(flowables)
+        else:
+            sections.append((orientation, flowables))
+
+
 def _render_pdf(markdown, output, images):
     font_path = prepare_font()
     with FontToolsFont(font_path) as font:
@@ -69,9 +109,10 @@ def _render_pdf(markdown, output, images):
                                   rightIndent={1: 21, 2: 14, 3: 11.5}[i],
                                   spaceAfter=9, keepWithNext=True) for i in (1, 2, 3)}
     cell_style = ParagraphStyle("Cell", parent=style, fontSize=9, leading=14, spaceAfter=0)
+    caption_style = ParagraphStyle("TableCaption", parent=cell_style, spaceAfter=5, keepWithNext=True)
     code_style = ParagraphStyle("Code", parent=style, fontSize=9, leading=13,
                                 spaceAfter=0, wordWrap=None, leftIndent=8)
-    story, lines = [], markdown.splitlines()
+    sections, story, lines = [], [], markdown.splitlines()
     index, in_code = 0, False
     while index < len(lines):
         line = lines[index].rstrip()
@@ -106,19 +147,28 @@ def _render_pdf(markdown, output, images):
                 index += 1
             cells = [[cell.strip() for cell in row.strip("|").split("|")] for row in table_lines]
             columns = max(len(row) for row in cells)
-            if columns > 6:
-                raise probe.ProbeError("PDF_TABLE_TOO_WIDE")
-            rows = [[Paragraph(clean_inline(cell), cell_style) for cell in row + [""] * (columns - len(row))] for row in cells]
-            table = LongTable(rows, colWidths=[(A4[0] - 100) / columns] * columns, repeatRows=1,
-                              splitByRow=1, splitInRow=1, hAlign="LEFT")
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8f2ef")),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c5d5d0")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            story += [table, Spacer(1, 10)]
+            if columns <= 6:
+                story.append(report_table(cells, range(columns), "portrait", cell_style))
+                continue
+
+            # Keep the preceding heading with the landscape table, including
+            # when the report starts directly with that heading and table.
+            while story and isinstance(story[-1], Spacer):
+                story.pop()
+            wide_story = []
+            if story and story[-1].getKeepWithNext():
+                wide_story.append(story.pop())
+            add_section(sections, "portrait", story)
+            story = []
+            if columns <= LANDSCAPE_COLUMNS:
+                wide_story.append(report_table(cells, range(columns), "landscape", cell_style))
+            else:
+                for start in range(1, columns, LANDSCAPE_COLUMNS - 1):
+                    end = min(start + LANDSCAPE_COLUMNS - 1, columns)
+                    caption = f"欄位 {start + 1} 至 {end}（各組均保留首欄）"
+                    wide_story.append(Paragraph(caption, caption_style))
+                    wide_story.append(report_table(cells, [0, *range(start, end)], "landscape", cell_style))
+            add_section(sections, "landscape", wide_story)
             continue
         match = re.match(r"^(#{1,3})\s+(.+)$", line)
         if line:
@@ -130,7 +180,8 @@ def _render_pdf(markdown, output, images):
         else:
             story.append(Spacer(1, 5))
         index += 1
-    if not any(line.strip() for line in lines):
+    add_section(sections, "portrait", story)
+    if not sections:
         raise probe.ProbeError("EMPTY_REPORT")
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -140,17 +191,33 @@ def _render_pdf(markdown, output, images):
         canvas.saveState()
         canvas.setFont("NotoTC", 8)
         canvas.setFillColor(colors.HexColor("#60736c"))
-        canvas.drawString(50, 28, "AI 協作草稿 · 經使用者審閱匯出")
-        canvas.drawRightString(A4[0] - 50, 28, f"第 {doc.page} 頁")
+        canvas.drawString(SIDE_MARGIN, 28, "AI 協作草稿 · 經使用者審閱匯出")
+        canvas.drawRightString(doc.pageTemplate.pagesize[0] - SIDE_MARGIN, 28, f"第 {doc.page} 頁")
         canvas.restoreState()
 
-    doc = SimpleDocTemplate(str(pending), pagesize=A4, rightMargin=50, leftMargin=50,
-                            topMargin=46, bottomMargin=48, title="課程作業報告", author="")
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
-    quality = validate_pdf(pending)
-    if not quality["passed"]:
-        raise probe.ProbeError("PDF_QA_FAILED")
-    pending.replace(output)
+    doc = BaseDocTemplate(str(pending), pagesize=PAGE_SIZES[sections[0][0]], title="課程作業報告", author="")
+    for orientation in dict.fromkeys(orientation for orientation, _ in sections):
+        width, height = PAGE_SIZES[orientation]
+        frame = Frame(SIDE_MARGIN, BOTTOM_MARGIN, width - 2 * SIDE_MARGIN,
+                      height - TOP_MARGIN - BOTTOM_MARGIN,
+                      leftPadding=FRAME_PADDING, rightPadding=FRAME_PADDING)
+        doc.addPageTemplates(PageTemplate(id=orientation, frames=frame,
+                                          pagesize=(width, height), onPage=footer))
+    story = []
+    for orientation, flowables in sections:
+        if story:
+            story.append(PageBreak(nextTemplate=orientation))
+        story.extend(flowables)
+    try:
+        doc.build(story)
+        quality = validate_pdf(pending)
+        if not quality["passed"]:
+            raise probe.ProbeError("PDF_QA_FAILED")
+        pending.replace(output)
+    except LayoutError:
+        raise probe.ProbeError("PDF_QA_FAILED") from None
+    finally:
+        pending.unlink(missing_ok=True)
     return {**quality, "sha256": hashlib.sha256(output.read_bytes()).hexdigest()}
 
 

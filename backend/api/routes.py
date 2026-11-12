@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -88,6 +89,9 @@ class ProgressRequest(BaseModel):
     excerpt: str = Field(default="", max_length=24000)
     requirements: str = Field(default="", max_length=6000)
     editor: str = Field(default="", max_length=80000)
+    research_query: str = Field(default="", max_length=300)
+    research_provider: Literal["crossref", "europepmc", "combined"] = "crossref"
+    research_full_text: bool = False
 
 
 def success(value):

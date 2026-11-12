@@ -93,6 +93,8 @@ export const errors = {
   INCOMPLETE_ACCEPTANCE_REQUIRED:'成果仍有未完成項目。核對後，請勾選接受目前成果再匯出。',
   ACCOUNT_CHANGED_RECONNECT:'請重新驗證目前的 Moodle 連線。', SIS_LOGIN_REQUIRED:'請先以同一個學校帳號登入校務系統。',
   COMPLETION_APPROVAL_REQUIRED:'請先核准本次自動完成作業。', APPROVAL_REQUIRED:'請先核對內容並核准本次傳送。',
+  EXTERNAL_APPROVAL_REQUIRED:'請先核准本次公開文獻查詢。', RESEARCH_QUERY_INVALID:'請輸入有效的公開主題或 DOI。',
+  RESEARCH_UNAVAILABLE:'暫時無法取得文獻。', RESEARCH_RESPONSE_TOO_LARGE:'文獻來源回傳的資料超過大小上限。',
   DISK_FULL:'磁碟空間不足，請釋放空間後再保存。', DELETE_CONFIRMATION_REQUIRED:'資料範圍已變更，請重新預覽並確認。',
   INVALID_REQUEST:'欄位內容不符合要求，請核對長度與格式。', NETWORK_ERROR:'無法連上本機服務，請確認啟動程式仍在執行。',
 };
