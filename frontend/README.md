@@ -1,7 +1,7 @@
 # HTML / CSS / JavaScript 前端
 
 正式入口為 `static/index.html`，由 `backend/main.py` 的 FastAPI 提供。所有靜態資源與 API
-沿用原本的 Host、Origin 與 HttpOnly session 檢查。啟動方式仍為 `scripts/run_mvp.ps1`，
+沿用原本的 Host、Origin 與 HttpOnly session 檢查。執行 `scripts/run.ps1` 啟動，
 再開啟終端機提供的 `/unlock/...` 網址。無 npm 安裝、編譯、CDN 或遠端字型需求。
 
 | 檔案 | 用途 |

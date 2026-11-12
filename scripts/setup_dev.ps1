@@ -23,4 +23,4 @@ try {
     npm ci --ignore-scripts --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw 'Bridge 環境安裝失敗' }
 } finally { Pop-Location }
-Write-Output '環境就緒。執行 ./scripts/run_mvp.ps1 開啟。'
+Write-Output '環境就緒。執行 ./scripts/run.ps1 開啟。'

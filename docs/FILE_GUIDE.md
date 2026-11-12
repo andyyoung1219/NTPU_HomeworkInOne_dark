@@ -61,7 +61,7 @@
 
 ```mermaid
 flowchart TD
-    Start[run_mvp.ps1 或 python -m backend.main] --> Main[backend/main.py]
+    Start[run.ps1 或 python -m backend.main] --> Main[backend/main.py]
     Main --> UI[frontend/static/index.html + app.js]
     Main --> API[backend/api/routes.py]
     UI --> Service[backend/services/study.py]
@@ -183,9 +183,10 @@ flowchart TD
 
 | 檔案 | 用途 | 執行時會做什麼 |
 | --- | --- | --- |
-| [scripts/run_mvp.ps1](../scripts/run_mvp.ps1) | 一般 MVP 啟動腳本。 | 切到專案根目錄、設定 Python UTF-8，以 `.venv` 執行 `backend.main`。 |
+| [scripts/run.ps1](../scripts/run.ps1) | 主程式啟動腳本。 | 切到專案根目錄、設定 Python UTF-8，以 `.venv` 執行 `backend.main`。 |
+| [scripts/run_mvp.ps1](../scripts/run_mvp.ps1) | 舊啟動指令的相容入口。 | 呼叫 `run.ps1`。 |
 | [scripts/run_p0.ps1](../scripts/run_p0.ps1) | P0 驗證工作台啟動腳本。 | 啟動 `backend.p0.app`；真人 AI 測試由工作台上的核准操作觸發。 |
-| [scripts/setup_dev.ps1](../scripts/setup_dev.ps1) | 建置開發環境。 | clone／確認固定上游版本、`uv sync --locked`、準備字型、安裝最小 Node Bridge 依賴。會連網下載來源與套件。 |
+| [scripts/setup_dev.ps1](../scripts/setup_dev.ps1) | 安裝或更新主程式環境。 | clone／確認固定上游版本、`uv sync --locked`、準備字型、安裝最小 Node Bridge 依賴。會連網下載來源與套件。 |
 | [scripts/setup_font.py](../scripts/setup_font.py) | 安裝 PDF 使用的開放中文字型。 | 讀 font.lock.json，必要時下載 Noto Sans TC、核對 hash，再建立可渲染的固定字重字型。 |
 | [scripts/vendor_bridge.py](../scripts/vendor_bridge.py) | 重新產生上游模組子集。 | 從 `.upstream/ntpu-ai-vscode` 複製指定模組與 License 到 vendor，重建逐檔 hash manifest；會覆寫對應 vendor 檔案。 |
 | [scripts/check_repository.py](../scripts/check_repository.py) | Git 內容的基本私人檔案與秘密掃描。 | 檢查已追蹤及可加入 Git 的檔案，拒絕個人產物／資料目錄與明顯的長字串憑證賦值；不是完整的資安稽核器。 |
@@ -194,7 +195,7 @@ flowchart TD
 | [scripts/prepare_live.py](../scripts/prepare_live.py) | 本人課程的真人驗收輔助腳本。 | 透過已啟動 MVP 的 API 與本機解鎖網址，恢復目前登入者的 Moodle，選取回傳的第一門課程及該課程第一份作業並下載附件。沒有課程或作業時對應欄位留空；無附件時節錄與要求留空，仍覆寫準備結果，不保留舊選取。不會送 AI。 |
 | [scripts/qa_live_pdf.py](../scripts/qa_live_pdf.py) | 最近一份已完成 PDF 的視覺 QA 準備。 | 從 SQLite 找到已完成任務，渲染每頁 PNG 到 `.local/qa/pdf/`，並輸出 PDF 檢查結果。實際版面仍需看渲染圖確認。 |
 
-平常執行產品使用 `run_mvp.ps1`；修改安裝環境看 `setup_dev.ps1`。
+平常使用 `run.ps1` 開啟主程式。首次安裝或更新依賴時執行 `setup_dev.ps1`。
 `prepare_live.py` 與 `qa_live_pdf.py` 是開發驗收輔助工具，沒有掛在日常啟動流程。
 
 ## 10. Skills 流程文件

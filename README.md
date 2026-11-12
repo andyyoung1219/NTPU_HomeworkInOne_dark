@@ -34,10 +34,10 @@ PDF 品質檢查失敗時，仍可下載 Markdown 與程式原始檔，或匯出
 
 ## 開啟使用
 
-完成安裝後，在本資料夾 PowerShell 執行：
+第一次使用請先[安裝主程式](#安裝與開發)。之後每次開啟，在專案根目錄的 PowerShell 執行：
 
 ```powershell
-./scripts/run_mvp.ps1
+./scripts/run.ps1
 ```
 
 開啟終端機顯示的 `http://127.0.0.1:8766/unlock/...` 網址。每次啟動換發本機存取金鑰。
@@ -87,8 +87,9 @@ PDF 由系統在審閱後匯出；題目要求的命名、補上本人資訊及�
 
 ## 準備程式執行環境（Docker）
 
-Docker 是執行 AI 產生程式時使用的隔離環境，也用於隔離測試。需要實際執行程式的直接完成任務，使用期間必須保持 Docker 引擎運作。
-只需閱讀、撰寫或以內建固定程式統計 CSV 的任務，可以在沒有 Docker 的情況下執行；缺少 Runner 時仍先產生可完成的報告，並列出尚未執行的程式／實驗與需要補做的事情。
+**沒有 Docker** 時，照[安裝與開發](#安裝與開發)的步驟安裝並啟動即可。讀題、撰寫、內建 CSV 統計及匯出都可使用。若作業需要實際執行程式，系統仍會保留產生的程式碼與可完成的草稿，並將未執行的實驗列為待辦。
+
+**需要用 Docker 跑程式或實驗**時，先完成主程式安裝，再依下列步驟準備 Runner。Runner 在隔離容器中執行 AI 產生的 Python，使用期間須保持 Docker 引擎運作。
 
 1. 在 Windows 安裝 Docker Desktop，啟用 WSL 2 後端並使用 **Linux containers**，啟動後等待引擎就緒。
 2. 在專案根目錄建立並檢查 Runner：
@@ -97,7 +98,7 @@ Docker 是執行 AI 產生程式時使用的隔離環境，也用於隔離測試
    .venv/Scripts/python.exe scripts/setup_runner.py
    ```
 
-3. 看到 `Runner ready` 後，依平常方式執行 `./scripts/run_mvp.ps1`。以後沿用已建立的映像，變更 Runner 或重裝 Docker 後再重新建置。
+3. 看到 `Runner ready` 後，執行 `./scripts/run.ps1`。以後沿用已建立的映像，變更 Runner 或重裝 Docker 後再重新建置。
 
 設定腳本會優先使用 `desktop-linux` context，建置官方 Python 基底映像，實際執行非 root 測試成功後才保存不可變映像 ID 與 context 至 `.local/app/runner.json`。
 目前不支援以 Podman 代替此 Runner；其 tmpfs inode 限制相容性未通過。若顯示 `netavark`／`nftables`，請檢查 Docker CLI 是否連到 Podman，並啟動 Docker Desktop。
@@ -111,11 +112,13 @@ Docker 是執行 AI 產生程式時使用的隔離環境，也用於隔離測試
 
 ```powershell
 ./scripts/setup_dev.ps1
-./scripts/run_mvp.ps1
+./scripts/run.ps1
 ```
 
-setup 會 checkout `docs/sources.lock.json` 的固定來源、依 `uv.lock` 安裝 Python 套件、
-安裝最小 Bridge 依賴與固定 hash 的 Noto Sans TC 字型。不要以任意 pip install 取代
+`setup_dev.ps1` 安裝主程式環境，有無 Docker 都要先執行。它會取得固定版本的上游來源，依 `uv.lock` 安裝 Python 套件，並準備 Node AI Bridge 和 Noto Sans TC 字型。第一次安裝或依賴更新時執行，平常直接用 `run.ps1`。
+`setup_runner.py` 只在需要讓系統實際執行 Python 時，另外建立和驗證 Docker Runner 映像。請先安裝主程式，再依[Docker 設定步驟](#準備程式執行環境docker)操作。
+
+不要以任意 pip install 取代
 `uv sync --locked`；安全相容覆寫記錄在 `docs/SECURITY.md`。
 
 ```powershell
