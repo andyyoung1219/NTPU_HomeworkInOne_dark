@@ -102,6 +102,8 @@ export const errors = {
   ASSIGNMENT_TEXT_NOT_AVAILABLE:'此作業沒有可讀取的網頁文字，請選擇附件並讀取，或前往 Moodle 核對。', ASSET_NOT_DOWNLOADED:'請先核准下載所選附件，再讀取內容。',
   AI_AUTH_REQUIRED:'NTPU AI 需要登入，請開啟連線管理。', AI_CONNECTION_PENDING:'AI 背景連線尚未就緒，請稍後檢查或恢復連線。',
   TOOL_TIMEOUT:'工具等待逾時，已有成果仍保留；請嘗試續跑。', AI_TIMEOUT:'AI 回覆逾時，已有成果仍保留；請嘗試續跑。',
+  INCOMPLETE_MODEL_RESPONSE:'NTPU AI 回覆在完成前中斷。', EMPTY_MODEL_RESPONSE:'NTPU AI 未回傳可用內容。',
+  AI_PROMPT_TOO_LARGE:'這次送出的資料超過 AI 單次上限。請分開處理或提供較短的來源節錄。',
   TASK_DEADLINE_EXCEEDED:'原任務已超過時限，請重新產生草稿。', REVIEW_REQUIRED:'請先核對草稿並勾選審閱確認。',
   INCOMPLETE_ACCEPTANCE_REQUIRED:'成果仍有未完成項目。核對後，請勾選接受目前成果再匯出。',
   ACCOUNT_CHANGED_RECONNECT:'請重新驗證目前的 Moodle 連線。', SIS_LOGIN_REQUIRED:'請先以同一個學校帳號登入校務系統。',

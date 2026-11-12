@@ -17,6 +17,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from lxml import etree
 
+from backend.agent.runner import filesystem_path
 from backend.models.store import now
 from backend.services.learning import fail
 from backend.services.reports import clean_inline
@@ -401,6 +402,7 @@ def task_images(study, task):
         path = path.resolve()
         if not path.is_relative_to(workspace) or not sha:
             fail('PATH_OUTSIDE_WORKSPACE')
+        path = filesystem_path(path)
         if path.stat().st_size > 20_000_000:
             fail('EXPORT_SIZE_LIMIT')
         data = path.read_bytes()
@@ -471,6 +473,7 @@ def export_extra(study, task_id, kind, include_sources=False):
                 path = path.resolve()
                 if not path.is_relative_to(workspace):
                     fail("PATH_OUTSIDE_WORKSPACE")
+                path = filesystem_path(path)
                 if path.stat().st_size > 30_000_000:
                     fail("EXPORT_SIZE_LIMIT")
                 data = path.read_bytes()
@@ -539,6 +542,9 @@ def export_extra(study, task_id, kind, include_sources=False):
                         "source_hashes": task.get("source_hashes", {}),
                         "unresolved": task.get("report_model", {}).get("unresolved", []),
                         "artifacts": {name: hashlib.sha256(data).hexdigest() for name, data in entries.items()}}
+            if task.get("plan", {}).get("deliverables"):
+                manifest["coverage"] = task["coverage"]
+                manifest["required_actions"] = task.get("completion", {}).get("required_actions", [])
             entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
             zip_path = output / "workspace.zip"
             pending = output / "workspace.pending.zip"

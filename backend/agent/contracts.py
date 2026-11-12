@@ -66,6 +66,8 @@ REGISTRY = {
     "plan_completion": ("medium", schema()),
     "gather_completion_data": ("external", schema()),
     "execute_completion": ("high", schema()),
+    "complete_deliverable": ("medium", schema(
+        {"unit_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}}, ["unit_id"])),
     # These tools remain behind the separate human review/export endpoint.
     "render_pdf": ("medium", schema()),
     "validate_pdf": ("low", schema()),

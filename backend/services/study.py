@@ -48,6 +48,7 @@ def error_code(error):
     if isinstance(error, AIError):
         code = str(error)
         return code if code in {"AI_AUTH_REQUIRED", "AI_SERVICE_LIMIT", "AI_TIMEOUT", "CANCELLED",
+                                "INCOMPLETE_MODEL_RESPONSE", "EMPTY_MODEL_RESPONSE",
                                 "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED", "RATE_LIMITED", "PERMISSION_DENIED",
                                 "INVALID_ATTACHMENT", "ATTACHMENT_APPROVAL_REQUIRED", "ATTACHMENT_CHANGED"} else "AI_BRIDGE_ERROR"
     return "OPERATION_FAILED"
@@ -672,6 +673,13 @@ class StudyService:
                     task["generated_files"]["analysis.py"] = {
                         "path": str(analysis.relative_to(self.root)),
                         "sha256": hashlib.sha256(analysis.read_bytes()).hexdigest()}
+            if task.get("deliverable_execution"):
+                from backend.agent.completion_units import verified_bytes
+
+                for unit_id, execution in task["deliverable_execution"].items():
+                    if program := execution.get("program"):
+                        verified_bytes(self, path.parent.parent, program)
+                        task["generated_files"][f"deliverable-{unit_id}.py"] = program
         return path
 
     def cancel(self, task_id):
@@ -733,6 +741,17 @@ class StudyService:
         export_started = now()
         try:
             images = {}
+            if task.get("plan", {}).get("deliverables"):
+                from backend.agent.completion_units import verified_bytes
+                from backend.agent.runner import filesystem_path
+
+                workspace = self.workspace(user, task_id)
+                for step_id, result in task["tool_results"].items():
+                    if step_id.startswith("unit-") and result.get("status") == "verified":
+                        for name, artifact in result.get("artifacts", {}).items():
+                            if name.endswith(".png"):
+                                verified_bytes(self, workspace, artifact)
+                                images[name] = filesystem_path(self.safe_path(artifact["path"]))
             if task.get("statistics_verified"):
                 for result in task.get("tool_results", {}).values():
                     if not result.get("independently_verified"):

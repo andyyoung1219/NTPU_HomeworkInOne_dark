@@ -113,6 +113,29 @@ test('review displays verified literature sources and partial lookup failures', 
   assert.match(html,/Crossref：暫時無法取得文獻/);
   flow.reset();
 });
+test('review shows deliverable status and specific user actions', async () => {
+  const reason = 'Use a browser with <script> support.';
+  const partial = {...draftTask,coverage:[
+    {deliverable_id:'experiment',title:'Run the experiment',status:'verified'},
+    {deliverable_id:'chart',title:'Interactive <chart>',status:'needs_action',reasons:[reason]},
+  ],completion:{status:'needs_action',required_actions:[`Interactive <chart> — ${reason}`,'Confirm the submission format.']}};
+  const {flow,calls} = harness(null,{
+    '/tasks/t1': () => partial,
+    '/tasks/t1/export': () => ({...partial,reviewed:true,accepted_incomplete:true}),
+  });
+  await flow.openTask('t1');
+  const html = flow.html();
+  assert.match(html,/Run the experiment · 已核對執行與輸出/);
+  assert.match(html,/Interactive &lt;chart&gt; · 需處理待辦/);
+  assert.match(html,/<strong>Interactive &lt;chart&gt;<\/strong><ul><li>Use a browser with &lt;script&gt; support\./);
+  assert.equal((html.match(/Use a browser/g) || []).length,1);
+  assert.match(html,/Confirm the submission format\./);
+  assert.match(html,/我已審閱內容與待處理事項，同意輸出目前成果/);
+  await flow.change({id:'work-reviewed',checked:true,dataset:{}});
+  await flow.action('work-export',{dataset:{kind:'pdf'}});
+  assert.equal(calls.find(call => call.path.endsWith('/draft')).body.accept_incomplete,true);
+  flow.reset();
+});
 test('parsed requirements preserve human-readable source identifiers',async () => {
   const {flow,calls} = harness(null,{'/assignments/a1/parse': () => ({excerpt:'source',requirements:[{id:'REQ-01',text:'Submit a report',source:{file_id:'assignment-description',section:1}}]})});
   await flow.load(); await flow.action('work-parse',{});

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from backend.agent.contracts import REGISTRY, AgentOptions
 from backend.agent.engine import RESUMABLE, resume_unavailable
+from backend.agent.runner import filesystem_path
 from backend.p0.ai import connection_status
 from backend.services.exports import export_extra
 from backend.services.study import StudyError, error_code
@@ -363,6 +364,7 @@ def routes(service):
                 path = service.safe_path(artifact["path"])
                 if not path.resolve().is_relative_to(service.workspace(service.user, task_id).resolve()):
                     raise StudyError("PATH_OUTSIDE_WORKSPACE")
+                path = filesystem_path(path)
                 if hashlib.sha256(path.read_bytes()).hexdigest() != artifact["sha256"]:
                     raise StudyError("ARTIFACT_CHANGED")
                 chart = name == "chart.png" and result.get("independently_verified") is True

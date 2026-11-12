@@ -1,6 +1,7 @@
 """Generate useful reports despite optional failures without inventing evidence."""
 
 import hashlib
+import json
 
 import httpx
 import pytest
@@ -9,6 +10,7 @@ from test_mvp import await_task
 from test_mvp import service as service
 
 from backend.agent import completion
+from backend.p0.ai import AIError
 from backend.p0.moodle import probe
 from backend.services.study import StudyError
 
@@ -136,6 +138,27 @@ def test_runner_failures_keep_report_without_trusting_output(automatic, code):
     assert result["status"] == "waiting_review" and result["completion"]["status"] == "needs_action"
     assert not result.get("runs") and not result["completion_execution"].get("result")
     assert "execution has not been verified" in result["draft"]
+
+
+@pytest.mark.parametrize("code", ["INCOMPLETE_MODEL_RESPONSE", "EMPTY_MODEL_RESPONSE"])
+def test_missing_model_code_continues_to_report_after_bounded_retries(automatic, monkeypatch, code):
+    automatic.ai.execution = True
+    original_begin = automatic.ai.begin
+
+    def begin(prompt):
+        payload = json.loads(prompt.rsplit("\n", 1)[1])
+        if "previous_code" in payload:
+            raise AIError(code)
+        return original_begin(prompt)
+
+    monkeypatch.setattr(automatic.ai, "begin", begin)
+    task = automatic.complete_assignment("2", "missing-code-" + code)
+    result = await_task(automatic, task["id"], timeout=10)
+    assert result["status"] == "waiting_review" and result["completion"]["status"] == "needs_action"
+    assert not result.get("runs") and not result["completion_execution"].get("code")
+    assert "no executable program was available" in result["draft"]
+    attempts = [step for step in result["tool_audit"] if step["tool"] == "execute_completion"]
+    assert len(attempts) == 3 and attempts[-1]["warning_code"] == code
 
 
 def test_substantive_report_with_unfinished_section_is_available_with_actions(automatic):

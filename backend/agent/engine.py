@@ -165,12 +165,24 @@ class AgentEngine:
         self.save(user, task)  # Persist before outbound effects, including failed requests.
 
     def run(self, user, task):
+        from backend.agent.completion_units import COMPLETION_LIMITS, assemble_report
         from backend.services.study import error_code
         try:
             self.graph.invoke({"user": user, "task": task, "done": False},
                               config={"recursion_limit": 45, "callbacks": []})
         except Exception as exc:
             code = error_code(exc)
+            if (code in COMPLETION_LIMITS and task["plan"].get("deliverables")
+                    and not self.study.active_jobs[task["id"]]["cancel"].is_set()
+                    and digest(task["plan"]) == task["plan_sha256"]):
+                try:
+                    assemble_report(self, user, task, stopped_for=code)
+                except Exception as assembly_error:
+                    code = error_code(assembly_error)
+                else:
+                    task.update(status="waiting_review", error=None, ready_for_export=False)
+                    task["checkpoint"].update(consecutive_errors=0, in_flight=None)
+                    return
             task["blockers"] = sorted(set(task.get("blockers", []) + [code]))
             if task["request"]["mode"] == "complete_assignment":
                 task["completion"] = {"status": "blocked", "blockers": sorted(set(
@@ -228,10 +240,14 @@ class AgentEngine:
             timeout = limits.get("ai_timeout", limits["tool_timeout"]) if step["tool"] == "generate_report" else limits["tool_timeout"]
             if automatic and step["tool"] == "plan_completion":
                 timeout = limits["ai_timeout"]
-            elif automatic and step["tool"] == "execute_completion":
+            elif automatic and step["tool"] in {"execute_completion", "complete_deliverable"}:
                 timeout = limits["ai_timeout"] + limits["tool_timeout"]
             if time.monotonic() - started > timeout:
                 fail("TOOL_TIMEOUT")
+            if automatic and step["tool"] == "plan_completion" and result.get("deliverables"):
+                from backend.agent.completion_units import expand_plan
+
+                expand_plan(task, result["deliverables"])
             task["tool_results"][step["id"]] = result
             audit.update(success=True, result_sha256=digest(result),
                          artifact_hashes=self.artifact_hashes(result))
@@ -248,12 +264,26 @@ class AgentEngine:
                     "TOOL_TIMEOUT", "AI_TIMEOUT", "OPERATION_TIMEOUT",
                     "AI_INVALID_COMPLETION_PLAN", "PYTHON_EXECUTION_FAILED", "COMPLETION_INCOMPLETE",
                     "DATASET_UNAVAILABLE", "RESEARCH_UNAVAILABLE", "AI_BRIDGE_ERROR", "AI_BRIDGE_EXITED",
-                    "AI_CONNECTION_PENDING",
+                    "AI_CONNECTION_PENDING", "INCOMPLETE_MODEL_RESPONSE", "EMPTY_MODEL_RESPONSE",
+                    "DELIVERABLE_ARTIFACT_MISSING", "DELIVERABLE_ARTIFACT_INVALID",
                 }
+                if step["tool"] == "complete_deliverable" and not any(
+                        entry.get("error_code") == "AI_PROMPT_TOO_LARGE" and entry["step_id"] == step["id"]
+                        for entry in task["tool_audit"][:-1]):
+                    retryable = retryable | {"AI_PROMPT_TOO_LARGE"}
             exhausted = attempt >= limits["max_retries"] or (automatic and checkpoint["consecutive_errors"] >= 3)
             if code not in retryable or exhausted:
-                from backend.agent.completion import fallback
-                result = fallback(self, user, task, step["tool"], code) if automatic else None
+                result = None
+                if automatic:
+                    self.check(user, task)
+                    if step["tool"] == "complete_deliverable":
+                        from backend.agent.completion_units import fallback_unit
+
+                        result = fallback_unit(task, step["required_inputs"]["unit_id"], code)
+                    else:
+                        from backend.agent.completion import fallback
+
+                        result = fallback(self, user, task, step["tool"], code)
                 if result is None:
                     raise
                 task["tool_results"][step["id"]] = result
@@ -298,6 +328,10 @@ class AgentEngine:
         work.mkdir(parents=True, exist_ok=True)
         if request["mode"] == "complete_assignment":
             from backend.agent import completion
+            if tool == "complete_deliverable":
+                from backend.agent.completion_units import execute_unit
+
+                return execute_unit(self, user, task, args["unit_id"])
             handlers = {"prepare_completion": completion.prepare, "plan_completion": completion.plan,
                         "gather_completion_data": completion.gather, "execute_completion": completion.execute,
                         "generate_report": completion.report}

@@ -6,8 +6,40 @@ const readline = require('node:readline');
 const { createHash } = require('node:crypto');
 const sharp = require('sharp');
 const { BrowserBridge } = require('../vendor/src/browser');
+const { BrowserManager } = require('../vendor/src/browser/manager');
 const storageRoot = path.join(process.env.LOCALAPPDATA || os.homedir(), 'NTPU HomeworkInOne', 'p0');
-const bridge = new BrowserBridge({ storageRoot, workspaces: [path.resolve(__dirname, '../..')] });
+const browserOptions = { storageRoot, workspaces: [path.resolve(__dirname, '../..')] };
+
+async function closeExtraTabs(context, primaryPage) {
+  if (!context || !primaryPage || primaryPage.isClosed()) return;
+  const extraPages = context.pages().filter(page => page !== primaryPage);
+  // Playwright's default close skips beforeunload, so a restored tab cannot
+  // hold up the next request with a prompt.
+  await Promise.allSettled(extraPages.map(page => page.close()));
+}
+
+class WorkspaceBrowserManager extends BrowserManager {
+  async launch(options) {
+    const launched = await super.launch(options);
+    // Session restoration can bring back several tabs in the dedicated profile.
+    if (options.headless) await closeExtraTabs(launched.context, launched.page);
+    return launched;
+  }
+}
+
+async function chatWithTabCleanup(bridge, prompt, options) {
+  const closeBackgroundTabs = () => {
+    if (bridge.mode === 'background') return closeExtraTabs(bridge.context, bridge.page);
+  };
+  try {
+    await closeBackgroundTabs();
+    return await bridge.chat(prompt, options);
+  } finally {
+    await closeBackgroundTabs();
+  }
+}
+
+const bridge = new BrowserBridge({ ...browserOptions, manager: new WorkspaceBrowserManager(browserOptions) });
 const jobs = new Map();
 let stopped = false;
 const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
@@ -44,12 +76,14 @@ async function decodeAttachment(value) {
   return { name: 'sources.png', mimeType: 'image/png', buffer, approved: true };
 }
 function output(message) { process.stdout.write(JSON.stringify(message) + '\n'); }
-function code(error) {
+function bridgeErrorCode(error) {
   const message = String(error?.message || '');
   if (error?.status === 429 || error?.serviceLimited || /429|額度|限制|rate.limit/i.test(message)) return 'AI_SERVICE_LIMIT';
   if ([401, 403].includes(error?.status) || /登入|驗證|401|403/.test(message)) return 'AI_AUTH_REQUIRED';
   if (/停止|abort/i.test(message)) return 'CANCELLED';
-  if (/逾時|timeout/i.test(message)) return 'AI_TIMEOUT';
+  if (['IDLE_RESPONSE_TIMEOUT', 'TOTAL_RESPONSE_TIMEOUT'].includes(error?.code)
+      || /逾時|timeout/i.test(message)) return 'AI_TIMEOUT';
+  if (['INCOMPLETE_MODEL_RESPONSE', 'EMPTY_MODEL_RESPONSE'].includes(error?.code)) return error.code;
   return 'AI_BRIDGE_ERROR';
 }
 async function dispatch(method, params) {
@@ -85,13 +119,15 @@ async function dispatch(method, params) {
       if (jobs.size) throw new Error('BUSY');
       const controller = new AbortController();
       jobs.set(params.task_id, controller);
-      void bridge.chat(params.prompt, {
+      void chatWithTabCleanup(bridge, params.prompt, {
         signal: controller.signal, timeoutMs: params.timeout_ms ?? 180000,
         attachment,
         onToken: () => output({ event: 'progress', task_id: params.task_id }),
-      }).then(result => output({ event: 'completed', task_id: params.task_id, text: result.text }))
-        .catch(error => output({ event: 'failed', task_id: params.task_id, code: code(error) }))
-        .finally(() => jobs.delete(params.task_id));
+      }).finally(() => jobs.delete(params.task_id))
+        .then(
+          result => output({ event: 'completed', task_id: params.task_id, text: result.text }),
+          error => output({ event: 'failed', task_id: params.task_id, code: bridgeErrorCode(error) }),
+        );
       return { task_id: params.task_id, status: 'running' };
     }
     case 'cancel_task': {
@@ -122,9 +158,9 @@ if (require.main === module) {
     .catch(error => output({ id: request.id, error: { code:
       ['BUSY', 'INVALID_REQUEST', 'APPROVAL_REQUIRED', 'METHOD_NOT_ALLOWED', 'INVALID_REFERENCE',
         'INVALID_ATTACHMENT', 'ATTACHMENT_APPROVAL_REQUIRED', 'ATTACHMENT_CHANGED'].includes(error.message)
-        ? error.message : code(error) } }));
+        ? error.message : bridgeErrorCode(error) } }));
 });
 input.on('close', () => { void bridge.close({ cleanup: false }).finally(() => process.exit(0)); });
 }
 
-module.exports = { decodeAttachment, MAX_ATTACHMENT_BYTES };
+module.exports = { decodeAttachment, MAX_ATTACHMENT_BYTES, WorkspaceBrowserManager, chatWithTabCleanup, bridgeErrorCode };

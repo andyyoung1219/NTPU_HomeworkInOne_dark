@@ -11,6 +11,7 @@ from backend.p0 import evidence
 from backend.p0.ai import AIAdapter, AIError
 from backend.p0.gate import evaluate
 from backend.p0.moodle import MoodleProbe, inspect_document, probe, validate_url
+from backend.services.study import error_code
 
 
 @pytest.mark.parametrize("url", [
@@ -106,6 +107,92 @@ def test_stdio_contract_no_approval_means_no_request():
         assert adapter.rpc("stream_events")["transport"] == "stdio-notifications"
     finally:
         adapter.close()
+
+
+def test_stdio_preserves_specific_model_response_failures():
+    cases = [
+        ({"code": "INCOMPLETE_MODEL_RESPONSE"}, "INCOMPLETE_MODEL_RESPONSE"),
+        ({"code": "EMPTY_MODEL_RESPONSE"}, "EMPTY_MODEL_RESPONSE"),
+        ({"code": "IDLE_RESPONSE_TIMEOUT"}, "AI_TIMEOUT"),
+        ({"code": "TOTAL_RESPONSE_TIMEOUT"}, "AI_TIMEOUT"),
+        ({"code": "INCOMPLETE_MODEL_RESPONSE", "status": 429}, "AI_SERVICE_LIMIT"),
+        ({"code": "EMPTY_MODEL_RESPONSE", "status": 403}, "AI_AUTH_REQUIRED"),
+        ({"code": "TOTAL_RESPONSE_TIMEOUT", "message": "aborted"}, "CANCELLED"),
+        ({"code": "UNCLASSIFIED", "diagnostics": {"opened": True}}, "AI_BRIDGE_ERROR"),
+    ]
+    script = """
+const { bridgeErrorCode } = require('./ntpu-ai-bridge/src/p0.cjs');
+const cases = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+console.log(JSON.stringify(cases.map(bridgeErrorCode)));
+"""
+    output = subprocess.run(["node", "-e", script], cwd=evidence.ROOT, check=True, timeout=20,
+                            input=json.dumps([case for case, _ in cases]), capture_output=True, text=True)
+    codes = json.loads(output.stdout)
+    expected = [code for _, code in cases]
+    assert codes == expected
+    assert [error_code(AIError(code)) for code in codes] == expected
+
+
+def test_bridge_closes_extra_tabs_before_and_after_background_chat():
+    script = """
+const assert = require('node:assert/strict');
+const { BrowserManager } = require('./ntpu-ai-bridge/vendor/src/browser/manager');
+const { WorkspaceBrowserManager, chatWithTabCleanup } = require('./ntpu-ai-bridge/src/p0.cjs');
+
+function makeSession() {
+  const tabs = [];
+  const newTab = () => {
+    let closed = false;
+    const page = {
+      isClosed: () => closed,
+      close: async () => { closed = true; },
+    };
+    tabs.push(page);
+    return page;
+  };
+  const page = newTab();
+  const context = { pages: () => tabs.filter(tab => !tab.isClosed()) };
+  return { page, context, newTab };
+}
+
+(async () => {
+  const originalLaunch = BrowserManager.prototype.launch;
+  BrowserManager.prototype.launch = async () => {
+    const session = makeSession();
+    session.newTab();
+    return session;
+  };
+  try {
+    const manager = new WorkspaceBrowserManager();
+    const background = await manager.launch({ headless: true });
+    assert.deepEqual(background.context.pages(), [background.page]);
+    const login = await manager.launch({ headless: false });
+    assert.equal(login.context.pages().length, 2);
+    const loginBridge = { ...login, mode: 'login', chat: async () => ({ text: 'login' }) };
+    await chatWithTabCleanup(loginBridge, 'test', {});
+    assert.equal(login.context.pages().length, 2);
+  } finally {
+    BrowserManager.prototype.launch = originalLaunch;
+  }
+
+  const session = makeSession();
+  const bridge = { ...session, mode: 'background' };
+  for (const error of [null, new Error('timeout'), new Error('cancelled')]) {
+    session.newTab();
+    bridge.chat = async () => {
+      assert.deepEqual(session.context.pages(), [session.page]);
+      session.newTab();
+      if (error) throw error;
+      return { text: 'completed' };
+    };
+    const result = chatWithTabCleanup(bridge, 'test', {});
+    if (error) await assert.rejects(result, error);
+    else assert.deepEqual(await result, { text: 'completed' });
+    assert.deepEqual(session.context.pages(), [session.page]);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    subprocess.run(["node", "-e", script], cwd=evidence.ROOT, check=True, timeout=20)
 
 
 def test_local_ui_requires_cookie_and_rejects_cross_origin():

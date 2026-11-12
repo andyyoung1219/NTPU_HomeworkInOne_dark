@@ -259,31 +259,47 @@ export function createWorkflow(ctx) {
     </details>`;
   }
   function reviewView() {
+    const coverage = (task?.coverage || []).filter(item => item.deliverable_id);
+    const pending = coverage.filter(item => item.status === 'needs_action');
+    const unitNotices = pending.filter(item => item.reasons?.length);
+    const explained = new Set(unitNotices.flatMap(item =>
+      item.reasons.map(reason => `${item.title || item.requirement} — ${reason}`)));
+    const actions = [...new Set([
+      ...(task?.completion?.required_actions || []),
+      ...(task?.completion?.blockers || []),
+      ...(task?.blockers || []),
+    ])].filter(item => item !== 'RUBRIC_REVIEW_REQUIRED' && !explained.has(item));
+    const unitNoticeItems = unitNotices.map(item => {
+      const reasons = item.reasons.map(reason => `<li>${esc(reason)}</li>`).join('');
+      return `<li><strong>${esc(item.title || item.requirement)}</strong><ul>${reasons}</ul></li>`;
+    }).join('');
+    const notice = actions.length || unitNotices.length ? `<div class="notice warning"><strong>尚待處理</strong><ul>
+      ${unitNoticeItems}
+      ${actions.map(a => `<li>${esc(a === task?.error ? errorText({code:a}) : a)}</li>`).join('')}
+      </ul></div>` : '';
     if (recoverable(task)) {
       return `<h2>已保留的部分草稿</h2>
         <p>作業尚未完成。可以先下載草稿，再返回執行狀態。</p>
+        ${notice}
         <article class="markdown-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
         ${researchResults()}
         <div class="work-export-list">${downloads()}</div>
         <div class="button-row">${button('返回執行狀態','work-progress','primary')}</div>`;
     }
-    const actions = [...new Set([
-      ...(task?.completion?.required_actions || []),
-      ...(task?.completion?.blockers || []),
-      ...(task?.blockers || []),
-    ])].filter(item => item !== 'RUBRIC_REVIEW_REQUIRED');
+    const deliverableStatus = {verified:'已核對執行與輸出',ready_for_review:'草稿待審閱',needs_action:'需處理待辦'};
     const omitted = Object.entries(task?.exports?.zip?.omitted_exports || {});
     const exportButton = (kind,style = '') => button(`匯出 ${formats[kind]}`,'work-export',style,`data-kind="${kind}" ${!reviewed ? 'disabled' : ''}`);
     return `<h2>審閱與輸出</h2>
       <p>核對成果後即可匯出。需要修正時，可直接編輯草稿。</p>
-      ${actions.length ? `<div class="notice warning"><strong>尚待處理</strong><ul>${actions.map(a => `<li>${esc(a === task?.error ? errorText({code:a}) : a)}</li>`).join('')}</ul></div>` : ''}
+      ${coverage.length ? `<ul aria-label="成果進度">${coverage.map(item => `<li>${esc(item.title || item.requirement)} · ${esc(deliverableStatus[item.status] || item.status)}</li>`).join('')}</ul>` : ''}
+      ${notice}
       <article class="markdown-preview" id="draft-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
       ${researchResults()}
       <details class="work-editor-details" ${dirty ? 'open' : ''}><summary>編輯草稿</summary>
         <label>草稿編輯 · Markdown<textarea id="work-editor" rows="10" maxlength="80000" spellcheck="false">${esc(value.editor)}</textarea></label>
         <div class="button-row">${button('保存修改','work-save','small')}<span class="work-status-meta" id="draft-save-state">${dirty ? '修改將在匯出時一併保存' : '草稿已保存'}</span></div>
       </details>
-      <label class="check"><input id="work-reviewed" type="checkbox" ${reviewed ? 'checked' : ''}><span>${actions.length ? '我已審閱內容與待處理事項，同意輸出目前成果' : '我已核對題目、內容與來源，可以匯出'}</span></label>
+      <label class="check"><input id="work-reviewed" type="checkbox" ${reviewed ? 'checked' : ''}><span>${actions.length || pending.length ? '我已審閱內容與待處理事項，同意輸出目前成果' : '我已核對題目、內容與來源，可以匯出'}</span></label>
       ${outputError ? `<p class="notice warning" role="alert">${esc(outputError)}</p>` : ''}
       <div class="button-row">${exportButton('pdf','primary')}</div>
       <details ${outputError ? 'open' : ''}><summary>其他格式</summary>
@@ -479,7 +495,8 @@ export function createWorkflow(ctx) {
     if (!reviewed) throw new Error('請先確認審閱。');
     const include = document.querySelector('#include-sources')?.checked || false;
     const accept = Boolean(task.blockers?.length || task.completion?.required_actions?.length ||
-      task.completion?.blockers?.length || task.accepted_incomplete);
+      task.completion?.blockers?.length || task.coverage?.some(item => item.status === 'needs_action') ||
+      task.accepted_incomplete);
     outputError = '';
     try {
       if (dirty || task.draft !== value.editor || !task.reviewed || Boolean(task.accepted_incomplete) !== accept) {
