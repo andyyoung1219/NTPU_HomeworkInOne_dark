@@ -1,4 +1,4 @@
-import {esc,id,icon,button,empty,badge,date,fullDate,heading,panel,table,option,externalLink,taskStatus,errorText} from './ui.js';
+import {esc,id,icon,button,empty,badge,date,fullDate,heading,panel,table,option,groupCoursesBySemester,externalLink,taskStatus,errorText} from './ui.js';
 import {createWorkflow} from './workflow.js';
 
 const $ = selector => document.querySelector(selector);
@@ -51,23 +51,47 @@ function assignmentRows(items) {
 function courseCards(items) {
   return `<div class="course-grid">${items.map(c => `<button class="course-card" data-action="open-course" data-id="${esc(c.id)}"><span class="course-symbol">${icon('book')}</span><h3>${esc(c.name)}</h3><p>${esc(c.semester || '學期未提供')}${c.code ? ' · ' + esc(c.code) : ''}</p><span class="card-bottom"><span>${c.stale ? '快取／待更新' : 'Moodle 課程'}</span><span>查看課程 ↗</span></span></button>`).join('')}</div>`;
 }
+function coursesView() {
+  const title = heading('我的課程','課程依學期由新到舊排列。',button(`${icon('refresh')} 同步課程`,'sync-courses'));
+  const [latest, ...history] = groupCoursesBySemester(courses);
+  if (!latest) return title + `<section class="panel">${empty('尚未同步課程','按右上角「同步課程」取得目前修課清單。')}</section>`;
+  const label = latest.semester ? `最新學期 ${latest.semester}` : '學期未提供';
+  const olderCourses = history.map(group => `
+    <details><summary>${esc(group.semester ?? '學期未提供')} <span class="count">${group.courses.length} 門</span></summary>
+      ${courseCards(group.courses)}
+    </details>`).join('');
+  return title + `<section><div class="section-heading"><h2>${esc(label)} <span class="count">${latest.courses.length} 門</span></h2></div>
+    ${courseCards(latest.courses)}</section>${olderCourses ? `<section aria-label="其他學期">${olderCourses}</section>` : ''}`;
+}
+function submissionRefreshNotice(error) {
+  return error ? `<p class="notice warning" role="status">未取得最新繳交狀態的作業會列為「待確認」。${esc(errorText({code:error}))}</p>` : '';
+}
 function homeView() {
-  const d = dashboard || {courses:[],assignments:[],upcoming:[],overdue:[],review:[],today:[],recent:[]};
+  const d = dashboard || {courses:[],assignments:[],upcoming:[],overdue:[],unknown:[],review:[],today:[],recent:[]};
+  const [latest] = groupCoursesBySemester(d.courses);
+  const currentCourses = latest?.semester ? latest.courses : [];
+  const activeCount = currentCourses.filter(course => course.scope !== 'inactive').length;
+  const courseNote = latest?.semester ? `最新學期 ${latest.semester}` : '學期未提供';
   let items = d.assignments;
-  if (assignmentFilter === 'pending') items = items.filter(a => a.submission_label !== '已提交');
+  if (assignmentFilter === 'pending') items = items.filter(a => ['未完成','逾期未提交'].includes(a.submission_label));
+  if (assignmentFilter === 'unknown') items = d.unknown;
   if (assignmentFilter === 'week') items = d.upcoming;
-  const stats = [ ['本週截止',d.upcoming.length,'份作業','先完成最接近截止的作業','calendar','accent'],['待審閱草稿',d.review.length,'份草稿','確認內容後即可匯出','edit',''],['進行中課程',d.courses.filter(c => c.scope !== 'inactive').length,'門課程','課程資料集中管理','book',''],['逾期未提交',d.overdue.length,'份作業','以 Moodle 提交狀態為準','clock','warm'] ];
-  return `<div class="page-heading"><div><div class="date-label">${icon('calendar')}${esc(fullDate())}</div><h1>讓今天的學習，更有條理。</h1><p>課程、作業與進度，一眼掌握。</p></div>${button(`${icon('refresh')} 同步課程`,'sync-courses')}</div>
-    ${!loggedIn ? `<section class="onboarding"><span>${icon('link')}</span><div><h2>歡迎來到你的學習工作台</h2><p>先連結 Moodle，將課程與作業帶進來。</p></div>${button('連結學校帳號 →','connections','primary')}</section>` : ''}
-    <div class="stats-grid">${stats.map(([title,count,unit,note,glyph,tone]) => `<div class="stat-card ${tone}"><div class="stat-top"><span>${title}</span>${icon(glyph)}</div><strong>${loggedIn ? count : '—'}</strong><span class="stat-unit">${unit}</span><small>${note}</small></div>`).join('')}</div>
+  const stats = [ ['本週截止',d.upcoming.length,'份作業','先完成最接近截止的作業','calendar','accent'],['待審閱草稿',d.review.length,'份草稿','確認內容後即可匯出','edit',''],['進行中課程',activeCount,'門課程',courseNote,'book',''],['逾期未提交',d.overdue.length,'份作業','依 Moodle 即時查詢結果','clock','warm'] ];
+  return `<div class="page-heading"><div><div class="date-label">${icon('calendar')}${esc(fullDate())}</div><h1>讓今天的學習，更有條理。</h1><p>課程、作業與進度，一眼掌握。</p></div>${button(`${icon('refresh')} 同步課程與作業`,'sync-overview')}</div>
+    ${!loggedIn ? `<section class="onboarding"><span>${icon('link')}</span><div><h2>歡迎來到暗黑工作台</h2><p>先連結 Moodle，將課程與作業帶進來。</p></div>${button('連結學校帳號 →','connections','primary')}</section>` : ''}
+    ${submissionRefreshNotice(d.submission_refresh_error)}
+    <div class="stats-grid">${stats.map(([title,count,unit,note,glyph,tone]) => `<div class="stat-card ${tone}"><div class="stat-top"><span>${title}</span>${icon(glyph)}</div><strong>${loggedIn ? count : '—'}</strong><span class="stat-unit">${unit}</span><small>${esc(note)}</small></div>`).join('')}</div>
     <div class="dashboard-columns"><div>${panel(`作業待辦 <span class="count">${items.length}</span>`,
-      `<div class="segment" aria-label="作業篩選">${[['pending','待處理'],['week','本週截止'],['all','全部作業']].map(([k,v]) => `<button class="${assignmentFilter === k ? 'active' : ''}" data-action="filter-assignments" data-filter="${k}" aria-pressed="${assignmentFilter === k}">${v}</button>`).join('')}</div>${assignmentRows(items.slice(0,6))}`,
+      `<div class="segment" aria-label="作業篩選">${[['pending','未完成'],['unknown','待確認'],['week','本週截止'],['all','全部作業']].map(([k,v]) => `<button class="${assignmentFilter === k ? 'active' : ''}" data-action="filter-assignments" data-filter="${k}" aria-pressed="${assignmentFilter === k}">${v}</button>`).join('')}</div>${assignmentRows(items.slice(0,6))}`,
       '<a class="text-link" href="#work">前往工作台 ↗</a>')}
       ${panel('最近的草稿',d.review.length ? d.review.slice(0,3).map(t => `<button class="assignment-row" data-action="open-task" data-id="${esc(t.id)}"><span class="row-icon">${icon('edit')}</span><span class="row-copy"><strong>${esc(t.title)}</strong><small>${date(t.created_at)}</small></span>${badge(taskStatus(t),'amber')}</button>`).join('') : empty('留一個位置，給你的下一份成果','完成 AI 生成後，在這裡繼續審閱與編輯。'),'<a class="text-link" href="#history">查看全部 ↗</a>')}</div>
       <div class="dashboard-side"><section class="feature-card"><span class="feature-orbit">${icon('spark')}</span><p class="eyebrow">HOMEWORK, SIMPLIFIED</p><h2>從題目到草稿，<br>一步一步完成。</h2><p>整理資料、釐清需求，讓 AI 協助你完成第一份草稿。</p>${button(`開始處理作業 ${icon('arrow')}`,'work','primary')}</section>
       ${panel('今天的課程',`<div class="panel-body">${d.today.length ? d.today.map(c => `<div class="schedule-row"><span class="schedule-time">第 ${esc(c.period || '?')} 節</span><span class="row-copy"><strong>${esc(c.name)}</strong><small>${esc(c.classroom || '教室未提供')} · ${esc(c.teacher || '教師未提供')}</small></span></div>`).join('') : empty('今天沒有已同步的課程','連結校務系統並同步課表，讓一天的安排更清楚。','<a class="text-link" href="#hub">查看學習資料 ↗</a>')}</div>`)}
       </div></div>
-      <div class="section-heading"><h2>我的課程 <span class="count">${d.courses.length}</span></h2><a class="text-link" href="#courses">所有課程 ↗</a></div>${d.courses.length ? courseCards(d.courses.slice(0,3)) : `<section class="panel">${empty('課程將顯示在這裡','連結後按「同步課程」，就能開始整理學習資料。')}</section>`}`;
+      <div class="section-heading"><h2>我的課程 <span class="count">${currentCourses.length}</span></h2><a class="text-link" href="#courses">所有課程 ↗</a></div>
+      ${currentCourses.length ? courseCards(currentCourses.slice(0,3)) : `<section class="panel">${d.courses.length
+        ? empty('尚無已辨識學期的課程','可到「我的課程」查看已同步的課程。')
+        : empty('課程將顯示在這裡','連結後按「同步課程」，就能開始整理學習資料。')}</section>`}`;
 }
 function snapshot(s) {
   if (!s) return '';
@@ -76,6 +100,7 @@ function snapshot(s) {
 function courseView(data) {
   const c = data.course, s = data.snapshots;
   return heading(c.name,`${c.semester || '學期未提供'} · 作業、教材與公告`,button(`${icon('refresh')} 完整同步本課`,'sync-one','',`data-id="${esc(c.id)}"`)) +
+    submissionRefreshNotice(data.submission_refresh_error) +
     panel('課程作業',assignmentRows(data.assignments)) +
     panel('章節與教材',`<div class="panel-body">${snapshot(s.contents)}${(s.contents.data || []).map(section => `<details><summary>${esc(section.name)}</summary><p class="pre-wrap muted">${esc(section.summary || '')}</p>${(section.modules || []).map(m => `<div class="file-item"><div><h3>${esc(m.name)}</h3><p class="muted pre-wrap">${esc(m.description || '')}</p>${externalLink(m.url,'官方頁面')}</div></div>`).join('')}</details>`).join('') || empty('尚無教材章節','按「完整同步本課」讀取 Moodle 教材。')}
       ${data.materials.length ? `<h3 class="section-heading">教材原檔</h3>${data.materials.map(m => `<div class="file-item"><span>${esc(m.name)}</span>${m.path ? `<a class="text-link" href="/api/materials/${id(m.id)}/file" download>下載原檔 ↗</a>` : button('核准下載到本機','download-material','small',`data-id="${esc(m.id)}"`)}</div>`).join('')}` : ''}</div>`) +
@@ -109,31 +134,45 @@ function searchView() {
     `<form id="search-form" class="search-form"><label>關鍵字<input id="search-query" name="q" maxlength="200" placeholder="搜尋作業名稱、教材內容…" value="${esc(searchFields.q)}"></label><label>課程<select name="course_id">${option('','全部課程',searchFields.course_id)}${courses.map(c => option(c.id,c.name,searchFields.course_id)).join('')}</select></label><label>截止日起<input name="due_from" type="date" value="${esc(searchFields.due_from)}"></label><label>截止日迄<input name="due_to" type="date" value="${esc(searchFields.due_to)}"></label><button class="button primary" type="submit">${icon('search')} 搜尋</button></form>
     ${r ? panel(`搜尋結果 <span class="count">${r.results.length}</span>`,r.results.map((hit,i) => `<article class="result-card"><h3>${esc(hit.title)} ${badge({course:'課程',assignment:'作業',asset:'附件',material:'教材',task:'任務'}[hit.kind] || hit.kind,'gray')}</h3><p>${esc(hit.snippet)}</p><p class="snapshot">來源頁／節：${esc(hit.page || hit.section || '—')} · 截止：${date(hit.due_at)}</p>${button('開啟來源','open-search-result','small',`data-index="${i}"`)}</article>`).join('') || empty('沒有找到符合的資料','試試其他關鍵字，或縮小課程與日期範圍。')) + `<p class="snapshot">索引更新：${date(r.index.indexed_at)}${r.truncated ? ' · 僅顯示前 100 筆，請縮小範圍。' : ''}</p>${r.index.issues.length ? `<details><summary>搜尋範圍與解析限制（${r.index.issues.length}）</summary>${r.index.issues.map(i => `<p class="snapshot">${esc(i.name)}：${esc(i.code)}</p>`).join('')}</details>` : ''}` : `<section class="panel">${empty('輸入關鍵字，從這裡開始','未下載文件僅搜尋檔名；CSV 內容搜尋涵蓋欄位與前五筆。')}</section>`}`;
 }
-async function refreshData() {
-  try { dashboard = await api('/dashboard'); courses = dashboard.courses; loggedIn = true; }
-  catch (error) { if (error.code !== 'MOODLE_LOGIN_REQUIRED') throw error; loggedIn = false; courses = []; dashboard = null; }
+async function refreshData({live = false, version = routeVersion} = {}) {
+  let next = null;
+  try { next = await api(live ? '/dashboard?live=true' : '/courses'); }
+  catch (error) { if (error.code !== 'MOODLE_LOGIN_REQUIRED') throw error; }
+  if (version !== routeVersion) return;
+  if (live || !next) dashboard = next;
+  courses = (live ? next?.courses : next) || [];
+  loggedIn = next !== null;
   $('#connection-summary').textContent = loggedIn ? 'Moodle 本機資料可用' : '管理學校帳號與 AI';
 }
-async function render() {
+async function render({keepView = false} = {}) {
   if (!booted) return;
+  const scrollTop = keepView ? window.scrollY : 0;
+  const details = keepView ? [...content.querySelectorAll('details')].map(el => el.open) : null;
   const version = ++routeVersion;
   const parts = location.hash.slice(1).split('/'); route = labels[parts[0]] ? parts[0] : 'home';
   try { routeRef = decodeURIComponent(parts.slice(1).join('/')); } catch { routeRef = ''; }
-  $('#page-label').textContent = labels[route]; document.title = `${labels[route]} · NTPU 學習工作台`;
+  $('#page-label').textContent = labels[route]; document.title = `${labels[route]} · NTPU 暗黑工作台`;
   document.querySelectorAll('[data-page]').forEach(el => { const selected = el.dataset.page === (route === 'course' ? 'courses' : route); el.classList.toggle('active',selected); if (selected) el.setAttribute('aria-current','page'); else el.removeAttribute('aria-current'); });
-  content.setAttribute('aria-busy','true'); content.innerHTML = '<div class="loading-state"><span class="spinner"></span><p>正在讀取本機資料…</p></div>';
+  const loading = route === 'home' || route === 'course' ? '正在向 Moodle 查詢繳交狀態…' : '正在讀取本機資料…';
+  content.setAttribute('aria-busy','true'); content.innerHTML = `<div class="loading-state"><span class="spinner"></span><p>${loading}</p></div>`;
   try {
     let html;
-    if (route === 'home') { await refreshData(); html = homeView(); }
+    if (route === 'home') { await refreshData({live:true,version}); html = homeView(); }
     else if (!loggedIn) html = heading(labels[route],'你的資料保存在本機。') + `<section class="panel">${loginEmpty()}</section>`;
-    else if (route === 'courses') html = heading('我的課程','課程內容、作業與成果，都有自己的位置。',button(`${icon('refresh')} 同步課程`,'sync-courses')) + (courses.length ? courseCards(courses) : `<section class="panel">${empty('尚未同步課程','按右上角「同步課程」取得目前修課清單。')}</section>`);
-    else if (route === 'course') html = courseView(await api(`/learning/courses/${id(routeRef)}`));
+    else if (route === 'courses') html = coursesView();
+    else if (route === 'course') html = courseView(await api(`/learning/courses/${id(routeRef)}?live=true`));
     else if (route === 'work') { await workflow.load(); html = workflow.html(); }
     else if (route === 'history') html = heading('歷史任務','繼續未完成的工作，或回顧已保存的成果。',button('開始新作業 →','work','primary')) + panel('所有任務',taskRows(await api('/tasks')));
     else if (route === 'hub') { hubData = await api('/hub'); html = hubView(); }
     else if (route === 'search') html = searchView();
     if (version !== routeVersion) return;
-    content.innerHTML = html; content.focus({preventScroll:true}); window.scrollTo({top:0,behavior:'instant'});
+    content.innerHTML = html;
+    if (details) {
+      content.querySelectorAll('details').forEach((el,index) => {
+        if (index < details.length) el.open = details[index];
+      });
+    } else content.focus({preventScroll:true});
+    window.scrollTo({top:scrollTop,behavior:'instant'});
   } catch (error) {
     if (version !== routeVersion) return;
     content.innerHTML = heading('暫時無法讀取','已保存的資料仍保留，請確認連線後再試一次。') + `<div class="notice error">${esc(errorText(error))}</div><div class="button-row">${button('重新讀取','refresh')}${button('管理連線','connections')}</div>`;
@@ -151,7 +190,7 @@ function providerFields() {
   const toggle = $('[data-action="toggle-password"]'); toggle.textContent = '顯示'; toggle.setAttribute('aria-pressed','false'); toggle.setAttribute('aria-label','顯示密碼');
 }
 async function identityChanged() {
-  workflow.reset(); searchResults = null; searchFields = {q:'',course_id:'',due_from:'',due_to:''}; discovered = []; deleteSnapshot = null; $('#delete-preview').hidden = true;
+  workflow.reset(); dashboard = null; searchResults = null; searchFields = {q:'',course_id:'',due_from:'',due_to:''}; discovered = []; deleteSnapshot = null; $('#delete-preview').hidden = true;
   await refreshData(); await render();
 }
 function syncResult(result) {
@@ -188,6 +227,19 @@ async function handleAction(name,el) {
       if (await confirmAction('登出所選服務？','已保存的本機資料會保留。','登出')) {
         await workflow.flush(); await api(`/connections/${id($('#provider').value)}`,'DELETE'); await identityChanged(); await checkConnections(); connectionMessage('已登出所選服務。');
       } break;
+    case 'sync-overview': {
+      const enrolled = await api('/sync/moodle','POST');
+      const [latest] = groupCoursesBySemester(enrolled);
+      try {
+        for (const course of latest?.courses || []) {
+          await api('/sync/moodle?course_id=' + id(course.id),'POST');
+        }
+      } finally {
+        await render();
+      }
+      if (!dashboard?.submission_refresh_error) notify(latest ? '課程與最新學期的作業繳交狀態已更新。' : '課程清單已更新。');
+      break;
+    }
     case 'sync-courses': await api('/sync/moodle','POST'); await refreshData(); await render(); notify('課程清單已更新。進入課程可同步作業與教材。'); break;
     case 'filter-assignments': assignmentFilter = el.dataset.filter; content.innerHTML = homeView(); break;
     case 'open-course': navigate('course',el.dataset.id); break;
@@ -286,10 +338,20 @@ $('#connections-dialog').addEventListener('close',() => { $('#password').value =
 document.addEventListener('keydown',event => {
   if (event.key === '/' && !event.ctrlKey && !event.metaKey && !/INPUT|TEXTAREA|SELECT/.test(event.target.tagName) && !document.querySelector('dialog[open]')) { event.preventDefault(); navigate('search'); }
 });
-window.addEventListener('hashchange',() => { void workflow.flush().then(render).catch(error => notify(errorText(error),true)); });
-document.addEventListener('visibilitychange',() => { if (document.visibilityState === 'hidden') void workflow.flush().catch(() => {}); });
+function refreshVisibleSubmissions() {
+  if (!booted || !loggedIn || mutationBusy || document.visibilityState !== 'visible'
+      || (route !== 'home' && route !== 'course') || content.getAttribute('aria-busy') === 'true'
+      || $('dialog[open]')) return;
+  void render({keepView:true});
+}
+window.addEventListener('hashchange',() => { void workflow.flush().then(() => render()).catch(error => notify(errorText(error),true)); });
+window.addEventListener('focus',refreshVisibleSubmissions);
+document.addEventListener('visibilitychange',() => {
+  if (document.visibilityState === 'hidden') void workflow.flush().catch(() => {});
+  else refreshVisibleSubmissions();
+});
 async function boot() {
-  try { await refreshData(); }
+  try { if (location.hash && location.hash !== '#home') await refreshData(); }
   catch (error) { booted = true; await render(); notify(errorText(error),true); return; }
   booted = true; await render();
 }

@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +11,7 @@ from test_sis import IDENTITY, enrolment, graduation_html
 from backend.integrations.sis import identity_key, validate_bridge
 from backend.integrations.sis_parser import parse_enrolment, parse_report
 from backend.main import ORIGIN, create_app
-from backend.p0.moodle import probe
+from backend.p0.moodle import MoodleProbe, probe
 from backend.services.data_hub import course_metadata
 from backend.services.study import StudyError, StudyService
 from frontend.data_hub import report_rows, snapshot_label
@@ -103,7 +104,99 @@ def test_previously_hidden_assignments_are_visible_before_and_after_sync(hub_ser
     assert len(reopened.assignments("1")) == 1
     reopened.close()
     assert len(service.sync_assignments("1")) == 1
+
+
+def test_resync_replaces_cached_draft_with_verified_submission(hub_service, monkeypatch):
+    service = hub_service
+    service.sync_assignments("1")
+    assert service.learning.dashboard()["assignments"][0]["submission_label"] == "未完成"
+    original_call = service.moodle.client.call
+
+    def submitted(function, token, params):
+        if function == "mod_assign_get_submission_status":
+            assert params == {"assignid": 101}
+            return 200, {"lastattempt": {"submission": {"status": "submitted"}}}
+        return original_call(function, token, params)
+
+    monkeypatch.setattr(service.moodle.client, "call", submitted)
+    service.sync_assignments("1")
+    assert service.learning.dashboard()["assignments"][0]["submission_label"] == "已提交"
     assert "hidden" not in service.get("assignment", "101")
+
+
+def test_live_views_query_latest_semester_and_fetch_each_visit(hub_service, monkeypatch):
+    service = hub_service
+    old = service.get("course", "2")
+    service.store.save(service.user, "course", "2", {**old, "semester": "114-2"})
+    service.sync_assignments("1")
+    service.sync_assignments("2")
+    called = []
+    states = iter(("submitted", "draft", "submitted"))
+
+    def credentials(*, expected_user):
+        assert expected_user == service.user
+        return "synthetic-token", FUNCTIONS
+
+    def submission(function, token, params):
+        assert function == "mod_assign_get_submission_status" and token == "synthetic-token"
+        called.append(params["assignid"])
+        return 200, {"lastattempt": {"submission": {"status": next(states)}}}
+
+    monkeypatch.setattr(service.moodle, "credentials", credentials)
+    monkeypatch.setattr(service.moodle.client, "call", submission)
+    with TestClient(create_app(service, "live-test"), base_url=ORIGIN) as client:
+        client.get("/unlock/live-test")
+        cached = client.get("/api/dashboard").json()["data"]
+        assert len(cached["assignments"]) == 2 and not called
+        first = client.get("/api/dashboard?live=true").json()["data"]
+        second = client.get("/api/dashboard?live=true").json()["data"]
+        archived = client.get("/api/learning/courses/2?live=true").json()["data"]
+    assert called == [101, 101, 102]
+    assert first["submission_refresh_error"] is None
+    assert [(a["id"], a["submission_label"]) for a in first["assignments"]] == [("101", "已提交")]
+    assert second["assignments"][0]["submission_label"] == "未完成"
+    assert archived["assignments"][0]["submission_label"] == "已提交"
+    assert service.get("assignment", "101")["submission_status"] == "draft"
+
+
+def test_live_rate_limit_keeps_only_verified_results_and_does_not_reuse_cached_labels(hub_service, monkeypatch):
+    service = hub_service
+    deadline = datetime.now(UTC).timestamp() - 60
+    for offset in range(3):
+        identifier = str(101 + offset)
+        service.store.save(service.user, "assignment", identifier, {
+            "id": identifier, "course_id": "1", "title": "合成作業", "due_at": deadline + offset,
+            "submission_status": "submitted" if offset != 2 else "draft", "asset_ids": [],
+        })
+    calls = []
+
+    def submission(function, token, params):
+        calls.append(params["assignid"])
+        if params["assignid"] == 102:
+            raise probe.ProbeError("RATE_LIMITED", 429)
+        return 200, {"lastattempt": {"submission": {"status": "submitted"}}}
+
+    monkeypatch.setattr(service.moodle, "credentials", lambda **kwargs: ("synthetic-token", FUNCTIONS))
+    monkeypatch.setattr(service.moodle.client, "call", submission)
+    live = service.learning.dashboard(live=True)
+    assert calls == [101, 102]
+    assert live["submission_refresh_error"] == "RATE_LIMITED"
+    assert [a["submission_label"] for a in live["assignments"]] == ["已提交", "待確認", "待確認"]
+    assert [a["id"] for a in live["unknown"]] == ["102", "103"]
+    assert not live["overdue"]
+
+
+def test_live_credentials_reject_another_saved_account_before_request(monkeypatch):
+    monkeypatch.setattr("backend.p0.moodle.Vault", lambda: SimpleNamespace(
+        operation=lambda *_: {"userid": 42, "token": "test"},
+    ))
+
+    def unexpected_request(*args):
+        pytest.fail("Live status lookup must not use the other account's saved credentials")
+
+    monkeypatch.setattr(probe, "site_info", unexpected_request)
+    with pytest.raises(probe.ProbeError, match="ACCOUNT_CHANGED_RECONNECT"):
+        MoodleProbe().credentials(expected_user="a" * 24)
 
 
 def test_removed_assignment_retained_for_history_but_hidden_from_active_list(hub_service, monkeypatch):

@@ -114,10 +114,14 @@ class MoodleProbe:
         self.inspector = inspector or inspect_document
         self.download_dir = download_dir or LOCAL / "input"
 
-    def credentials(self):
+    def credentials(self, *, expected_user=None):
         saved = Vault().operation("load", probe.account_key("p0"))
         if not saved:
             raise probe.ProbeError("moodle_login_required")
+        if expected_user is not None:
+            owner = hashlib.sha256(f"moodle:{saved['userid']}".encode()).hexdigest()[:24]
+            if owner != expected_user:
+                raise probe.ProbeError("ACCOUNT_CHANGED_RECONNECT")
         info, available = probe.site_info(self.client, saved["token"])
         if info["userid"] != saved["userid"]:
             raise probe.ProbeError("account_identity_changed")

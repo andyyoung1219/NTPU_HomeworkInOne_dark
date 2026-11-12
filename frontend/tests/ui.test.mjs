@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {esc,markdown,safeURL,taskStatus} from '../static/ui.js';
+import {esc,groupCoursesBySemester,markdown,safeURL,taskStatus} from '../static/ui.js';
 
 test('untrusted source and AI HTML never executes in preview', () => {
   const output = markdown('# Title\n<script>alert(1)</script>\n![image](https://tracker.example/image)\n<a href="javascript:alert(1)">go</a>\n```html\n<img src=x onerror=alert(1)>\n```');
@@ -29,4 +29,27 @@ test('completed generation with required user actions is not labelled fully comp
   assert.equal(taskStatus({status:'waiting_review',completion:{required_actions:['補上資料']}}),'需處理待辦');
   assert.equal(taskStatus({status:'completed',completion:{status:'needs_action'}}),'需處理待辦');
   assert.equal(taskStatus({status:'completed',completion:{status:'complete'}}),'已匯出');
+});
+
+test('course groups sort by numeric academic year and term with unknown semesters last', () => {
+  const courses = [
+    {id: 'unknown'},
+    {id: 'older', semester: '114-2'},
+    {id: 'current-first', semester: '115-1'},
+    {id: 'invalid', semester: '116-3'},
+    {id: 'current-second', semester: '115-1'},
+    {id: 'same-year-later', semester: '115-2'},
+    {id: 'older-year', semester: '99-2'},
+    {id: 'newer-year', semester: '100-1'},
+  ];
+  const groups = groupCoursesBySemester(courses);
+  assert.deepEqual(groups.map(group => [group.semester, group.courses.map(course => course.id)]), [
+    ['115-2', ['same-year-later']],
+    ['115-1', ['current-first', 'current-second']],
+    ['114-2', ['older']],
+    ['100-1', ['newer-year']],
+    ['99-2', ['older-year']],
+    [null, ['unknown', 'invalid']],
+  ]);
+  assert.equal(courses[0].id, 'unknown');
 });

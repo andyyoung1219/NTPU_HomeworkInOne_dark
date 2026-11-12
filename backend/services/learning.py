@@ -6,11 +6,16 @@ already downloaded files; it never downloads or sends anything to a model.
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
+from keyring.errors import KeyringError
+
 from backend.models.store import now
+from backend.p0.moodle import probe
+from backend.services.data_hub import TTL
 from backend.services.documents import parse
 
 TAIPEI = timezone(timedelta(hours=8))
@@ -38,11 +43,42 @@ def submission_label(item, timestamp):
     state = item.get("submission_status", "unknown")
     if state == "submitted":
         return "已提交"
-    if state not in {"new", "draft", "reopened", "not_submitted", "no_submission"}:
+    if item.get("stale") or state not in {"new", "draft", "reopened", "not_submitted", "no_submission"}:
         return "待確認"
+    if synced_at := item.get("last_synced_at"):
+        try:
+            if timestamp - datetime.fromisoformat(synced_at).timestamp() > TTL:
+                return "待確認"
+        except (TypeError, ValueError):
+            return "待確認"
     if item.get("due_at") and item["due_at"] < timestamp:
         return "逾期未提交"
     return "未完成"
+
+
+def latest_course_ids(courses):
+    semesters = {}
+    for course in courses:
+        semester = course.get("semester")
+        match = re.fullmatch(r"([0-9]{1,3})-([12])", semester) if isinstance(semester, str) else None
+        semesters[course["id"]] = tuple(map(int, match.groups())) if match else (0, 0)
+    latest = max(semesters.values(), default=None)
+    return {course["id"] for course in courses
+            if course.get("scope") != "inactive" and semesters[course["id"]] == latest}
+
+
+def submission_refresh_error(error):
+    if error.code in {"ACCOUNT_CHANGED_RECONNECT", "account_identity_changed"}:
+        return "ACCOUNT_CHANGED_RECONNECT"
+    if error.code in {"moodle_login_required", "invalidtoken", "requireloginerror"} or error.status == 401:
+        return "MOODLE_LOGIN_REQUIRED"
+    if error.code in {"RATE_LIMITED", "NETWORK_UNAVAILABLE"}:
+        return error.code
+    if error.status in {502, 503, 504}:
+        return "NETWORK_UNAVAILABLE"
+    if error.code in {"accessexception", "webserviceaccess"} or error.status == 403:
+        return "MOODLE_PERMISSION_DENIED"
+    return "SUBMISSION_STATUS_UNAVAILABLE"
 
 
 class LearningCenter:
@@ -69,22 +105,74 @@ class LearningCenter:
                            "due_label": due_label(item.get("due_at"))})
         return sorted(result, key=lambda a: (a.get("due_at") or float("inf"), a["title"]))
 
-    @locked
-    def dashboard(self):
-        items = self.assignments()
+    def refresh_submissions(self, user, items, timestamp):
+        """Project Moodle's live response without changing the saved assignment data."""
+        for item in items:
+            item.update(submission_status="unknown", submission_label="待確認")
+        if not items:
+            return None
+        try:
+            token, functions = self.study.moodle.credentials(expected_user=user)
+        except probe.ProbeError as error:
+            return submission_refresh_error(error)
+        except (KeyringError, ValueError, OSError):
+            return "SUBMISSION_STATUS_UNAVAILABLE"
+        if "mod_assign_get_submission_status" not in functions:
+            return "MOODLE_PERMISSION_DENIED"
+        failure = None
+        for item in items:
+            if self.study.user != user:
+                fail("ACCOUNT_CHANGED_RECONNECT")
+            assignment_id = str(item["id"])
+            if not re.fullmatch(r"[1-9][0-9]*", assignment_id):
+                failure = "SUBMISSION_STATUS_UNAVAILABLE"
+                continue
+            try:
+                _, payload = self.study.moodle.client.call("mod_assign_get_submission_status", token, {
+                    "assignid": int(assignment_id),
+                })
+                observation = probe.submission_observation(payload)
+                if item.get("team_submission") or payload["lastattempt"].get("teamsubmission") is not None:
+                    continue  # Group submission does not establish individual status.
+                state = observation["individual_state"]
+                item.update(submission_status=state,
+                            submission_label=submission_label({"submission_status": state,
+                                                               "due_at": item.get("due_at")}, timestamp))
+            except probe.ProbeError as error:
+                code = submission_refresh_error(error)
+                if code in {"RATE_LIMITED", "NETWORK_UNAVAILABLE", "MOODLE_LOGIN_REQUIRED",
+                            "ACCOUNT_CHANGED_RECONNECT"}:
+                    return code
+                failure = failure or code
+        return failure
+
+    def _refresh_for_view(self, user, items, timestamp):
+        # Moodle requests can take time. Keep the app lock free for other work,
+        # but discard the view if its account changed before we could return it.
+        error = self.refresh_submissions(user, items, timestamp)
+        with self.study.lock:
+            if self.study.require_user() != user:
+                fail("ACCOUNT_CHANGED_RECONNECT")
+        return error
+
+    def dashboard(self, live=False):
+        with self.study.lock:
+            user = self.study.require_user()
+            courses = self.records("course")
+            active = (latest_course_ids(courses) if live else
+                      {c["id"] for c in courses if c.get("scope") != "inactive"})
+            items = [a for a in self.assignments() if a["course_id"] in active]
+            tasks = self.records("task")
+            timetable = self.study.hub.snapshot("sis:timetable")
         current = datetime.now(TAIPEI)
         timestamp = current.timestamp()
-        courses = self.records("course")
-        active = {c["id"] for c in courses if c.get("scope") != "inactive"}
-        items = [a for a in items if a["course_id"] in active]
-        tasks = self.records("task")
-        timetable = self.study.hub.snapshot("sis:timetable")
+        refresh = {"submission_refresh_error": self._refresh_for_view(user, items, timestamp)} if live else {}
         today = []
         for course in (timetable.get("data") or {}).get("courses", []):
             for meeting in course.get("meetings", []):
                 if meeting.get("weekday") == current.isoweekday():
                     today.append({**meeting, "name": course["name"], "teacher": course.get("teacher")})
-        return {"date": current.date().isoformat(), "courses": courses,
+        return {**refresh, "date": current.date().isoformat(), "courses": courses,
                 "today": sorted(today, key=lambda x: str(x.get("period") or "").zfill(3)),
                 "timetable": timetable, "assignments": items,
                 "upcoming": [a for a in items if a.get("due_at") and timestamp <= a["due_at"]
@@ -94,16 +182,21 @@ class LearningCenter:
                 "review": [t for t in tasks if t.get("draft") and t["status"] != "completed"],
                 "recent": tasks[:12]}
 
-    @locked
-    def course(self, course_id):
-        course = self.study.get("course", course_id)
-        assignments = self.assignments(course_id)
-        ids = {a["id"] for a in self.records("assignment") if a["course_id"] == course_id}
-        snapshots = self.study.hub.course(course_id)
-        return {"course": course, "assignments": assignments, "snapshots": snapshots,
-                "tasks": [t for t in self.records("task") if t["assignment_id"] in ids],
-                "materials": self.materials(course_id),
-                "assets": [a for a in self.records("asset") if a["assignment_id"] in ids]}
+    def course(self, course_id, live=False):
+        with self.study.lock:
+            user = self.study.require_user()
+            course = self.study.get("course", course_id)
+            assignments = self.assignments(course_id)
+            ids = {a["id"] for a in self.records("assignment") if a["course_id"] == course_id}
+            snapshots = self.study.hub.course(course_id)
+            view = {"course": course, "assignments": assignments, "snapshots": snapshots,
+                    "tasks": [t for t in self.records("task") if t["assignment_id"] in ids],
+                    "materials": self.materials(course_id),
+                    "assets": [a for a in self.records("asset") if a["assignment_id"] in ids]}
+        if live:
+            view["submission_refresh_error"] = self._refresh_for_view(
+                user, assignments, datetime.now(TAIPEI).timestamp())
+        return view
 
     def materials(self, course_id):
         snapshots = self.study.hub.course(course_id)

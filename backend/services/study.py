@@ -263,6 +263,7 @@ class StudyService:
                     "title": raw.get("name", ""), **text, "description_lookup_issue": text_lookup_issue,
                     "source_url": f"{probe.MOODLE}/mod/assign/view.php?id={raw['cmid']}",
                     "due_at": raw.get("duedate") or None, "submission_status": submission,
+                    "team_submission": bool(raw.get("teamsubmission")),
                     "asset_ids": asset_ids, "last_synced_at": now(), "stale": False,
                     "removed": False}))
             active = set(self.moodle.assignments)

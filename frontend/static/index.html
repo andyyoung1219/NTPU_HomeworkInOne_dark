@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="description" content="集中管理臺北大學課程、作業與學習資料的本機工作台。">
-  <title>NTPU 學習工作台</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23b8e99b'/%3E%3Cpath d='M11 28V12h4l10 16h4V12' fill='none' stroke='%23151915' stroke-width='3'/%3E%3C/svg%3E">
+  <title>NTPU 暗黑工作台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/devil-mark.svg">
   <link rel="stylesheet" href="/static/styles.css">
   <script type="module" src="/static/app.js"></script>
 </head>
@@ -14,7 +14,10 @@
   <a class="skip-link" href="#content">跳至主要內容</a>
   <div class="app-shell">
     <aside class="sidebar" aria-label="主選單">
-      <a class="brand" href="#home"><span class="brand-mark">N<span>↗</span></span><span>NTPU<span class="brand-caption">學習工作台</span></span></a>
+      <a class="brand" href="#home" aria-label="NTPU 暗黑工作台">
+        <img class="brand-mark" src="/static/devil-mark.svg" width="40" height="40" alt="">
+        <span>NTPU<span class="brand-caption">暗黑工作台</span></span>
+      </a>
       <div class="workspace-label">我的學習空間 <span>LOCAL</span></div>
       <nav class="main-nav">
         <a href="#home" data-page="home"><span data-icon="grid"></span>學習總覽</a>

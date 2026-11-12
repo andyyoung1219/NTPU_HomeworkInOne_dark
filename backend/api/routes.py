@@ -115,12 +115,12 @@ def routes(service):
             "Content-Disposition": 'attachment; filename="diagnostics.json"'})
 
     @api.get("/dashboard")
-    def dashboard():
-        return success(service.learning.dashboard())
+    def dashboard(live: bool = False):
+        return success(service.learning.dashboard(live=live))
 
     @api.get("/learning/courses/{course_id}")
-    def learning_course(course_id: str):
-        return success(service.learning.course(course_id))
+    def learning_course(course_id: str, live: bool = False):
+        return success(service.learning.course(course_id, live=live))
 
     @api.get("/search")
     def search(q: str = "", course_id: str | None = None,

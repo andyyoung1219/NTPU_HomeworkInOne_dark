@@ -27,6 +27,18 @@ export const heading = (title, description, action = '', eyebrow = '') => `<div 
 export const panel = (title, body, action = '') => `<section class="panel"><div class="panel-head"><h2>${title}</h2>${action}</div>${body}</section>`;
 export const table = (headers, rows) => rows.length ? `<div class="table-wrap"><table><thead><tr>${headers.map(h => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : empty('尚無資料','同步後，資料會顯示在這裡。');
 export const option = (value, label, selected) => `<option value="${esc(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${esc(label)}</option>`;
+export function groupCoursesBySemester(courses) {
+  const groups = new Map();
+  for (const course of courses) {
+    const match = /^([0-9]{1,3})-([12])$/.exec(course.semester ?? '');
+    const year = match ? Number(match[1]) : 0;
+    const term = match ? Number(match[2]) : 0;
+    const semester = match ? `${year}-${term}` : null;
+    if (!groups.has(semester)) groups.set(semester, {semester, year, term, courses: []});
+    groups.get(semester).courses.push(course);
+  }
+  return [...groups.values()].sort((a, b) => b.year - a.year || b.term - a.term);
+}
 export function safeURL(value) {
   if (typeof value !== 'string' || !value.trim()) return '';
   try { const url = new URL(value, 'http://127.0.0.1:8766'); return ['http:','https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; }
@@ -86,6 +98,7 @@ export function taskStatus(task) {
 export const errors = {
   MOODLE_LOGIN_REQUIRED:'請先連結 Moodle，或恢復先前的登入連線。', LOCAL_AUTH_REQUIRED:'本機存取已過期。請使用啟動終端機顯示的 unlock 網址重新開啟。',
   NETWORK_UNAVAILABLE:'目前無法連線，請稍後重試；已保存的內容仍保留。', AI_BUSY:'AI 正在執行其他任務，請等待完成或先停止任務。', TASK_RUNNING:'任務仍在執行，請等待完成或先停止任務。',
+  RATE_LIMITED:'服務暫時限制查詢頻率，請稍後再試。', MOODLE_PERMISSION_DENIED:'目前的 Moodle 連線無法讀取這些繳交狀態。', SUBMISSION_STATUS_UNAVAILABLE:'Moodle 沒有回傳可確認的繳交狀態。',
   ASSIGNMENT_TEXT_NOT_AVAILABLE:'此作業沒有可讀取的網頁文字，請選擇附件並讀取，或前往 Moodle 核對。', ASSET_NOT_DOWNLOADED:'請先核准下載所選附件，再讀取內容。',
   AI_AUTH_REQUIRED:'NTPU AI 需要登入，請開啟連線管理。', AI_CONNECTION_PENDING:'AI 背景連線尚未就緒，請稍後檢查或恢復連線。',
   TOOL_TIMEOUT:'工具等待逾時，已有成果仍保留；請嘗試續跑。', AI_TIMEOUT:'AI 回覆逾時，已有成果仍保留；請嘗試續跑。',

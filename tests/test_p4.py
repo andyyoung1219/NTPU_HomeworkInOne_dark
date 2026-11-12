@@ -42,6 +42,17 @@ def test_dashboard_dates_unknown_status_and_course_scope(service):
     a["submission_status"] = "draft"
     service.store.save(service.user, "assignment", "2", a)
     assert service.learning.dashboard()["overdue"][0]["id"] == "2"
+    a["last_synced_at"] = (datetime.now(TAIPEI) - timedelta(days=1)).isoformat()
+    service.store.save(service.user, "assignment", "2", a)
+    data = service.learning.dashboard()
+    assert data["overdue"] == []
+    assert any(item["id"] == "2" for item in data["unknown"])
+    a["last_synced_at"] = datetime.now(TAIPEI).isoformat()
+    a["stale"] = True
+    service.store.save(service.user, "assignment", "2", a)
+    data = service.learning.dashboard()
+    assert data["overdue"] == []
+    assert any(item["id"] == "2" for item in data["unknown"])
     a["submission_status"] = "submitted"
     service.store.save(service.user, "assignment", "2", a)
     assert service.learning.dashboard()["overdue"] == []
