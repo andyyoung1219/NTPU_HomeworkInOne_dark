@@ -15,6 +15,13 @@ const needsAI = task => task?.status === 'blocked_auth' || task?.error === 'AI_C
 const canResume = task => task?.status === 'waiting_approval' ||
   (recoverable(task) && Boolean(task.plan && task.request_sha256) && !task.resume_unavailable);
 const formats = {pdf:'PDF',docx:'Word',zip:'ZIP',markdown:'Markdown',manifest:'來源紀錄'};
+const hasReviewChecklist = task => [task?.completion?.required_actions,task?.completion?.review_required,
+  task?.completion?.blockers,task?.blockers,task?.report_model?.unresolved,
+  task?.report_model?.completion?.required_actions,task?.report_model?.completion?.blockers].some(group =>
+  group?.some(item => item !== 'RUBRIC_REVIEW_REQUIRED'));
+const unfinishedStages = task => (task?.coverage || []).filter(item =>
+  !item.optional && ['needs_action','needs_review'].includes(item.status) &&
+  task.plan?.deliverables?.some(unit => unit.id === item.deliverable_id && unit.kind !== 'manual'));
 const restartReasons = {
   TASK_DEADLINE_EXCEEDED: '原任務已超過時限，請重新執行。',
   RETRY_BUDGET_EXCEEDED: '原步驟已用完重試次數，請重新執行。',
@@ -68,6 +75,9 @@ export function createWorkflow(ctx) {
     initialized = false; runStyle = 'guided'; dirty = false; visual = false; clearApproval(); retryRequest = null; saveError = null;
     clearMessages();
   }
+  function discardTask(ref) {
+    if (value.task_id === ref) reset();
+  }
   function payload() { return {...value,selected_asset_ids:[...value.selected_asset_ids]}; }
   function save() {
     clearTimeout(saveTimer);
@@ -99,6 +109,10 @@ export function createWorkflow(ctx) {
           value.page = 'generate';
         } else if (runStyle === 'complete' && value.page === 'sources') {
           value.page = finished(task) ? 'review' : 'generate';
+        }
+        if (value.page === 'generate') {
+          if (!value.editor) value.editor = task.draft || '';
+          if (finished(task)) value.page = 'review';
         }
         dirty = value.editor !== (task.draft || '');
         if (finished(task) && task.error) outputError = exportMessage(task.error);
@@ -238,10 +252,22 @@ export function createWorkflow(ctx) {
       ${task.draft ? `<div class="button-row">${button('查看已保留的草稿','work-review','small')}</div>` : ''}
     </div>`;
   }
-  function downloads() {
+  function downloads(partial = false) {
     if (!task || dirty) return '';
-    const kinds = [...(task.pdf ? ['pdf','manifest'] : []),...(task.draft ? ['markdown'] : []),...Object.keys(task.exports || {})];
-    return kinds.map(k => `<a class="button small" href="/api/artifacts/${id(task.id)}/download?kind=${id(k)}" download>${icon('download')} 下載 ${formats[k] || esc(k)}</a>`).join('') + Object.keys(task.generated_files || {}).map(name => `<a class="button small" href="/api/tasks/${id(task.id)}/artifacts/${id(name)}" download>${icon('download')} ${esc(name)}</a>`).join('');
+    const stale = task.stale_exports || [];
+    const kinds = [...(task.pdf ? ['pdf','manifest'] : []),...(task.draft ? ['markdown'] : []),
+      ...Object.keys(task.exports || {})].filter(kind => !stale.includes(kind === 'manifest' ? 'pdf' : kind));
+    const outputs = Object.entries(task.tool_results || {})
+      .filter(([step,result]) => step.startsWith('unit-') && ['verified','user_supplied'].includes(result.status))
+      .flatMap(([,result]) => Object.entries(result.artifacts || {})
+        .filter(([,file]) => result.status === 'user_supplied' || file.filename !== 'run.json')
+        .map(([name,file]) => [name,file.filename || name]));
+    const files = [...Object.keys(task.generated_files || {}).map(name => [name,name]),...outputs];
+    const checklist = hasReviewChecklist(task)
+      ? `<a class="button small" href="/api/artifacts/${id(task.id)}/download?kind=checklist" download>${icon('download')} 另存待辦清單</a>` : '';
+    const reexport = stale.length ? `<p class="notice warning" role="status">${esc(stale.map(kind => formats[kind]).join('、'))} 已有舊版匯出檔。請確認審閱後重新匯出。</p>` : '';
+    return reexport + kinds.map(k => `<a class="button small" href="/api/artifacts/${id(task.id)}/download?kind=${id(k)}" download>${icon('download')} 下載 ${partial && k !== 'manifest' ? '部分成果 ' : ''}${formats[k] || esc(k)}</a>`).join('') + files.map(([name,label]) => `<a class="button small" href="/api/tasks/${id(task.id)}/artifacts/${id(name)}" download>${icon('download')} ${esc(label)}</a>`).join('') +
+      checklist;
   }
   function researchResults() {
     const step = task?.plan?.steps?.find(step => step.tool === 'web_research');
@@ -258,57 +284,114 @@ export function createWorkflow(ctx) {
       }).join('')}</ul>` : '<p class="muted">這次查詢沒有取得文獻。</p>'}
     </details>`;
   }
+  function revisionScope(units, selected) {
+    const affected = new Set([selected]);
+    for (const unit of units) {
+      if ([...(unit.dependencies || []),...(unit.optional_dependencies || [])].some(ref => affected.has(ref))) {
+        affected.add(unit.id);
+      }
+    }
+    return units.filter(unit => affected.has(unit.id));
+  }
+  function revisionSummary(units, selected, mode) {
+    const affected = revisionScope(units,selected);
+    const steps = affected.map(unit => unit.title).join('、');
+    const expected = units.find(unit => unit.id === selected)?.expected_artifacts || [];
+    const outputs = mode === 'result' && expected.length ? `此階段需附上 ${expected.join('、')}。` : '';
+    return `${steps}與報告將更新。${outputs}`;
+  }
+  function revisionView(pending) {
+    const units = task?.plan?.deliverables;
+    if (!finished(task) || !units?.length) return '';
+    const selected = units.find(unit => pending.some(item => item.deliverable_id === unit.id))?.id || units[0].id;
+    return `<details><summary>只補跑受影響的階段</summary>
+      <div class="form-grid">
+        <label>要更新的階段<select id="work-revision-unit">${units.map(unit => option(unit.id,unit.title,selected)).join('')}</select></label>
+        <label>補充方式<select id="work-revision-mode">
+          ${option('retry','沿用現有資料重新執行','retry')}
+          ${option('supplement','補上資料並重新執行','retry')}
+          ${option('result','提供自行完成的結果','retry')}
+        </select></label>
+      </div>
+      <p class="work-status-meta" id="work-revision-scope" aria-live="polite">${esc(revisionSummary(units,selected,'retry'))}</p>
+      <div id="work-revision-inputs" hidden>
+        <label>資料或結果說明<textarea id="work-revision-notes" rows="3" maxlength="2400"></textarea></label>
+        <label>附加檔案（每檔最多 1 MB）<input id="work-revision-files" type="file" accept=".txt,.csv,.json" multiple></label>
+      </div>
+      <div class="button-row">${button('建立補跑版本','work-revise','small')}</div>
+    </details>`;
+  }
   function reviewView() {
     const coverage = (task?.coverage || []).filter(item => item.deliverable_id);
-    const pending = coverage.filter(item => item.status === 'needs_action');
+    const pending = coverage.filter(item => item.status === 'needs_action' && !item.optional && !item.action_deferred);
+    const unconfirmed = coverage.filter(item => item.status === 'needs_review');
+    const unfinished = unfinishedStages(task);
+    const reviewChecklist = runStyle === 'complete' && hasReviewChecklist(task);
+    const partialOutput = unfinished.length || (!coverage.length && reviewChecklist);
     const unitNotices = pending.filter(item => item.reasons?.length);
-    const explained = new Set(unitNotices.flatMap(item =>
-      item.reasons.map(reason => `${item.title || item.requirement} — ${reason}`)));
+    const explained = new Set(unitNotices.flatMap(item => [item.action,
+      ...item.reasons.map(reason => `${item.title || item.requirement} — ${reason}`)]));
+    const reviewNotices = new Set(task?.completion?.review_required || []);
     const actions = [...new Set([
       ...(task?.completion?.required_actions || []),
       ...(task?.completion?.blockers || []),
       ...(task?.blockers || []),
-    ])].filter(item => item !== 'RUBRIC_REVIEW_REQUIRED' && !explained.has(item));
+    ])].filter(item => item !== 'RUBRIC_REVIEW_REQUIRED' && !explained.has(item) && !reviewNotices.has(item));
     const unitNoticeItems = unitNotices.map(item => {
       const reasons = item.reasons.map(reason => `<li>${esc(reason)}</li>`).join('');
-      return `<li><strong>${esc(item.title || item.requirement)}</strong><ul>${reasons}</ul></li>`;
+      const refs = item.action_requirement_ids?.length ? `（${item.action_requirement_ids.join('、')}）` : '';
+      return `<li><strong>${esc((item.title || item.requirement) + refs)}</strong><ul>${reasons}</ul></li>`;
     }).join('');
     const notice = actions.length || unitNotices.length ? `<div class="notice warning"><strong>尚待處理</strong><ul>
       ${unitNoticeItems}
       ${actions.map(a => `<li>${esc(a === task?.error ? errorText({code:a}) : a)}</li>`).join('')}
       </ul></div>` : '';
+    const reviewNotice = reviewNotices.size ? `<div class="notice warning"><strong>交付要求待確認</strong><ul>
+      ${[...reviewNotices].map(message => `<li>${esc(message)}</li>`).join('')}
+      </ul></div>` : '';
+    const revisionNotice = task?.revision?.draft_edits_conflicted ? `<p class="notice warning" role="status">部分人工修改與重跑內容重疊。${task.revision_parent_available === false ? '' : '可開啟補跑前的成果核對。'}</p>` : '';
     if (recoverable(task)) {
       return `<h2>已保留的部分草稿</h2>
         <p>作業尚未完成。可以先下載草稿，再返回執行狀態。</p>
-        ${notice}
+        ${notice}${reviewNotice}${revisionNotice}
         <article class="markdown-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
         ${researchResults()}
-        <div class="work-export-list">${downloads()}</div>
+        <div class="work-export-list">${downloads(true)}</div>
         <div class="button-row">${button('返回執行狀態','work-progress','primary')}</div>`;
     }
-    const deliverableStatus = {verified:'已核對執行與輸出',ready_for_review:'草稿待審閱',needs_action:'需處理待辦'};
+    const executionChecked = '已執行，數值與解法待核對';
+    const deliverableStatus = {verified:executionChecked,execution_checked:executionChecked,user_supplied:'使用者提供，待審閱',ready_for_review:'草稿待審閱',needs_action:'需處理待辦',needs_review:'未完成，待確認是否必交'};
+    const statusLabel = item => item.status === 'needs_action' && item.optional ? '選做' :
+      item.action_deferred ? '等待前置成果' : deliverableStatus[item.status] || item.status;
     const omitted = Object.entries(task?.exports?.zip?.omitted_exports || {});
-    const exportButton = (kind,style = '') => button(`匯出 ${formats[kind]}`,'work-export',style,`data-kind="${kind}" ${!reviewed ? 'disabled' : ''}`);
+    const exportButton = (kind,style = '') => button(
+      `${partialOutput ? '匯出部分成果' : '匯出'} ${formats[kind]}`,'work-export',style,
+      `data-kind="${kind}" ${!reviewed ? 'disabled' : ''}`);
     return `<h2>審閱與輸出</h2>
-      <p>核對成果後即可匯出。需要修正時，可直接編輯草稿。</p>
-      ${coverage.length ? `<ul aria-label="成果進度">${coverage.map(item => `<li>${esc(item.title || item.requirement)} · ${esc(deliverableStatus[item.status] || item.status)}</li>`).join('')}</ul>` : ''}
-      ${notice}
+      <p>${partialOutput ? '這份作業仍有待確認的內容，可先保留部分成果。' : reviewChecklist
+        ? '核對正文與尚待處理的必交要求後，可匯出目前成果。'
+        : '核對後可匯出繳交用文件。需要修正時，可直接編輯正文。'}</p>
+      ${coverage.length ? `<ul aria-label="成果進度">${coverage.map(item => `<li>${esc(item.title || item.requirement)} · ${esc(statusLabel(item))}</li>`).join('')}</ul>` : ''}
+      ${notice}${reviewNotice}${revisionNotice}
       <article class="markdown-preview" id="draft-preview" aria-label="草稿預覽">${markdown(value.editor)}</article>
       ${researchResults()}
       <details class="work-editor-details" ${dirty ? 'open' : ''}><summary>編輯草稿</summary>
         <label>草稿編輯 · Markdown<textarea id="work-editor" rows="10" maxlength="80000" spellcheck="false">${esc(value.editor)}</textarea></label>
         <div class="button-row">${button('保存修改','work-save','small')}<span class="work-status-meta" id="draft-save-state">${dirty ? '修改將在匯出時一併保存' : '草稿已保存'}</span></div>
       </details>
-      <label class="check"><input id="work-reviewed" type="checkbox" ${reviewed ? 'checked' : ''}><span>${actions.length || pending.length ? '我已審閱內容與待處理事項，同意輸出目前成果' : '我已核對題目、內容與來源，可以匯出'}</span></label>
+      <label class="check"><input id="work-reviewed" type="checkbox" ${reviewed ? 'checked' : ''}><span>${actions.length || pending.length || reviewNotices.size ? '我已審閱內容與待處理事項，同意輸出目前成果' : '我已核對題目、內容與來源，可以匯出'}</span></label>
       ${outputError ? `<p class="notice warning" role="alert">${esc(outputError)}</p>` : ''}
-      <div class="button-row">${exportButton('pdf','primary')}</div>
-      <details ${outputError ? 'open' : ''}><summary>其他格式</summary>
-        <div class="button-row">${exportButton('docx')}${exportButton('zip')}</div>
+      <div class="button-row">${unfinished.length
+        ? button('補跑未完成階段','work-retry-stage','primary',`data-unit="${esc(unfinished[0].deliverable_id)}"`)
+        : partialOutput ? button('重新執行','work-regenerate','primary') : exportButton('pdf','primary')}</div>
+      <details ${outputError || task?.stale_exports?.some(kind => kind !== 'pdf') ? 'open' : ''}><summary>其他格式</summary>
+        <div class="button-row">${partialOutput ? exportButton('pdf') : ''}${exportButton('docx')}${exportButton('zip')}</div>
         <label class="check"><input id="include-sources" type="checkbox"><span>ZIP 也包含原始題目與附件</span></label>
       </details>
-      <div class="work-export-list" id="work-downloads">${downloads()}</div>
+      <div class="work-export-list" id="work-downloads">${downloads(partialOutput)}</div>
       ${omitted.length && !dirty ? `<p class="notice warning">ZIP 未包含的格式：${omitted.map(([kind,code]) => `${esc(kind.toUpperCase())}（${esc(code)}）`).join('、')}。其他可用成果仍可下載。</p>` : ''}
-      <div class="button-row">${button('重新執行','work-regenerate','small')}</div>`;
+      ${revisionView(unfinished.length ? unfinished : pending.length ? pending : unconfirmed)}
+      <div class="button-row">${task?.revision && task.revision_parent_available !== false ? button('查看補跑前的成果','work-revision-parent','small') : ''}${partialOutput && !unfinished.length ? '' : button('重新執行','work-regenerate','small')}</div>`;
   }
   function html() {
     const pages = Object.keys(steps).filter(page => runStyle === 'guided' || page !== 'sources');
@@ -336,7 +419,7 @@ export function createWorkflow(ctx) {
     value.excerpt = parsed.excerpt;
     value.requirements = parsed.requirements.map(r => {
       const source = typeof r.source === 'object' ? `${r.source.file_id} / 頁或節 ${r.source.page ?? r.source.section ?? '?'}` : r.source;
-      return `[ ] ${r.id} ${r.text}（來源：${source}）`;
+      return `${r.optional ? '[選做]' : '[ ]'} ${r.id} ${r.text}（來源：${source}）`;
     }).join('\n').slice(0,6000);
     clearApproval();
     sourceError = parsed.truncated ? '節錄已達長度上限，請核對題目內容。' : '';
@@ -445,7 +528,7 @@ export function createWorkflow(ctx) {
     const request = task.request;
     const waiting = task.status === 'waiting_approval';
     const extras = [
-      researchScope(request),
+      task.revision ? '' : researchScope(request),
       request.allow_code_execution ? '在隔離環境執行程式' : '',
     ].filter(Boolean);
     const description = (waiting ? '依原任務設定執行並傳送資料至 NTPU AI。' : '沿用已完成的步驟，必要時再次傳送資料至 NTPU AI。') +
@@ -456,7 +539,7 @@ export function createWorkflow(ctx) {
       task = await ctx.api(endpoint(waiting ? '/approve' : '/resume'),'POST',{
         request_sha256:task.request_sha256,
         code_execution_approved:Boolean(request.allow_code_execution),
-        external_research_approved:Boolean(request.allow_external_research),
+        external_research_approved:Boolean(request.allow_external_research && !task.revision),
       });
       if (!dirty) value.editor = task.draft || '';
       await go(finished(task) ? 'review' : 'generate');
@@ -491,11 +574,59 @@ export function createWorkflow(ctx) {
       else throw error;
     }
   }
+  async function reviseTask(retryUnit = null) {
+    if (!finished(task) || !task.plan?.deliverables?.length) return;
+    const unit_id = retryUnit ?? document.querySelector('#work-revision-unit').value;
+    const mode = retryUnit ? 'retry' : document.querySelector('#work-revision-mode').value;
+    const notes = mode === 'retry' ? '' : document.querySelector('#work-revision-notes').value.trim();
+    const files = mode === 'retry' ? [] : [...document.querySelector('#work-revision-files').files];
+    const units = task.plan.deliverables;
+    const selected = units.find(unit => unit.id === unit_id);
+    if (!selected) throw new Error('請選擇要更新的階段。');
+    if (mode !== 'retry' && !notes && !files.length) throw new Error('請填寫說明或附加檔案。');
+    const suffixes = mode === 'result' ? /\.(txt|csv|json|png)$/i : /\.(txt|csv|json)$/i;
+    if (files.length > (mode === 'result' ? 12 : 4) ||
+        files.some(file => !file.size || file.size > 1000000 || !suffixes.test(file.name))) {
+      throw new Error('請核對檔案數量、格式與大小。');
+    }
+    const missing = (selected.expected_artifacts || []).filter(name => !files.some(file => file.name === name));
+    if (mode === 'result' && missing.length) throw new Error(`請附上指定成果 ${missing.join('、')}。`);
+    const affected = revisionScope(units,unit_id);
+    const sandbox = affected.some(unit => unit.kind === 'python' && (mode !== 'result' || unit.id !== unit_id))
+      ? '並允許受影響的程式在隔離環境執行' : '';
+    const replace = mode === 'supplement' && task.unit_supplements?.[unit_id]
+      ? '這次提供的資料會更新本階段先前的補充資料。' : '';
+    const summary = revisionSummary(units,unit_id,mode);
+    const scope = mode === 'retry' ? '核准將必要的資料節錄重新傳送至 NTPU AI' : '核准將補充說明與必要的資料節錄傳送至 NTPU AI';
+    if (!await ctx.confirm('建立補跑版本？',`${summary}${replace}${scope}${sandbox}。原稿可從歷史任務開啟。`,'同意並補跑')) return;
+    const attachments = await Promise.all(files.map(async file => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 16384) {
+        binary += String.fromCharCode(...bytes.subarray(offset,offset + 16384));
+      }
+      return {name:file.name,data:btoa(binary)};
+    }));
+    await flush();
+    if (dirty && value.editor.trim()) {
+      task = await ctx.api(endpoint('/draft'),'PUT',{markdown:value.editor,reviewed:false});
+      dirty = false;
+    }
+    const body = {unit_id,mode,notes,files:attachments,approved:true};
+    const path = endpoint('/revise');
+    const signature = JSON.stringify([path,body]);
+    if (retryRequest?.signature !== signature) retryRequest = {signature,key:crypto.randomUUID()};
+    const next = await ctx.api(path,'POST',body,{'Idempotency-Key':retryRequest.key});
+    retryRequest = null; task = next; value.task_id = next.id; value.editor = next.draft || ''; dirty = false;
+    await go(finished(next) ? 'review' : 'generate');
+    watch();
+  }
   async function exportDraft(kind) {
     if (!reviewed) throw new Error('請先確認審閱。');
     const include = document.querySelector('#include-sources')?.checked || false;
     const accept = Boolean(task.blockers?.length || task.completion?.required_actions?.length ||
-      task.completion?.blockers?.length || task.coverage?.some(item => item.status === 'needs_action') ||
+      task.completion?.blockers?.length || task.completion?.review_required?.length ||
+      task.coverage?.some(item => item.status === 'needs_action' && !item.optional && !item.action_deferred) ||
       task.accepted_incomplete);
     outputError = '';
     try {
@@ -535,6 +666,9 @@ export function createWorkflow(ctx) {
         if (await ctx.confirm('停止這次任務？','已完成的步驟與草稿會保留，可以稍後繼續。','停止執行')) { await ctx.api(endpoint('/cancel'),'POST'); await refreshTask(); watch(); } break;
       case 'work-resume': await resumeTask(); break;
       case 'work-regenerate': await restartTask(); break;
+      case 'work-revise': await reviseTask(); break;
+      case 'work-retry-stage': await reviseTask(el.dataset.unit); break;
+      case 'work-revision-parent': if (task?.revision) { await openTask(task.revision.parent_task_id); repaint(true); } break;
       case 'work-save':
         task = await ctx.api(endpoint('/draft'),'PUT',{markdown:value.editor,reviewed:false}); dirty = false; clearApproval(); await save(); repaint(); ctx.notify('草稿已保存，匯出前請重新確認審閱。'); break;
       case 'work-export': await exportDraft(el.dataset.kind); break;
@@ -558,7 +692,13 @@ export function createWorkflow(ctx) {
     scheduleSave();
   }
   async function change(el) {
-    if (el.id === 'work-course') {
+    if (['work-revision-unit','work-revision-mode'].includes(el.id)) {
+      const mode = document.querySelector('#work-revision-mode').value;
+      const unit = document.querySelector('#work-revision-unit').value;
+      document.querySelector('#work-revision-scope').textContent = revisionSummary(task.plan.deliverables,unit,mode);
+      document.querySelector('#work-revision-inputs').hidden = mode === 'retry';
+      document.querySelector('#work-revision-files').accept = mode === 'result' ? '.txt,.csv,.json,.png' : '.txt,.csv,.json';
+    } else if (el.id === 'work-course') {
       await flush(); const cid = el.value;
       const list = cid ? await ctx.api(`/courses/${id(cid)}/assignments`) : [];
       const a = list.length ? await ctx.api(`/assignments/${id(list[0].id)}`) : null;
@@ -590,5 +730,5 @@ export function createWorkflow(ctx) {
     else if (el.id === 'work-approve') { approved = el.checked; const btn = document.querySelector('[data-action="work-start"]'); if (btn) btn.disabled = !approved || !value.excerpt.trim(); }
     else if (el.id === 'work-reviewed') { reviewed = el.checked; document.querySelectorAll('[data-action="work-export"]').forEach(btn => btn.disabled = !reviewed); }
   }
-  return {load,html,action,input,change,reset,flush,openAssignment,openTask,hasWork:() => Boolean(value.assignment_id)};
+  return {load,html,action,input,change,reset,discardTask,flush,openAssignment,openTask,hasWork:() => Boolean(value.assignment_id)};
 }

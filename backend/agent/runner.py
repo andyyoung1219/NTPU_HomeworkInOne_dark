@@ -16,6 +16,7 @@ from backend.agent.contracts import fail
 
 MAX_OUTPUT = 2 * 1024 * 1024
 CREATE_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CONTAINER_DATA_ROOT = Path("/data")
 
 
 def container_cli():
@@ -38,6 +39,13 @@ def filesystem_path(path):
     if os.name == "nt" and not absolute.startswith("\\\\?\\"):
         return Path("\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\") else "\\\\?\\" + absolute)
     return Path(absolute)
+
+
+def runner_data_volume():
+    volume = os.environ.get("NTPU_RUNNER_DATA_VOLUME")
+    if volume is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]+", volume):
+        fail("SANDBOX_CONFIG_INVALID")
+    return volume
 
 
 class DockerRunner:
@@ -64,6 +72,7 @@ class DockerRunner:
 
     def status(self):
         try:
+            runner_data_volume()
             image = self.image()
             info = subprocess.run([*self.engine_command(), "image", "inspect", image, "--format", "{{.Os}}"],
                 capture_output=True, timeout=5, creationflags=CREATE_FLAGS)
@@ -74,6 +83,16 @@ class DockerRunner:
 
     @staticmethod
     def command(image, name, staging):
+        resolved = staging.resolve()
+        mount = f"type=bind,source={resolved},target=/input,readonly"
+        if (volume := runner_data_volume()) is not None:
+            data_root = CONTAINER_DATA_ROOT
+            if resolved != staging.absolute() or not resolved.is_relative_to(data_root):
+                fail("SANDBOX_CONFIG_INVALID")
+            subpath = resolved.relative_to(data_root).as_posix()
+            if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+/)*[a-f0-9]{32}/input", subpath):
+                fail("SANDBOX_CONFIG_INVALID")
+            mount = f"type=volume,source={volume},volume-subpath={subpath},volume-nocopy,target=/input,readonly"
         # No host output mount, Docker socket, environment forwarding, or shell.
         return ["docker", "run", "--rm", "--pull=never", "--name", name,
                 "--network=none", "--read-only", "--user=65532:65532",
@@ -83,7 +102,7 @@ class DockerRunner:
                 "--ulimit=core=0:0", "--log-driver=none",
                 "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16m,nr_inodes=128,mode=1777",
                 "--tmpfs=/output:rw,noexec,nosuid,nodev,size=8m,nr_inodes=64,mode=1777",
-                "--mount", f"type=bind,source={staging.resolve()},target=/input,readonly",
+                "--mount", mount,
                 "--workdir=/output", "--entrypoint=python", image,
                 "-I", "-B", "/opt/runner.py"]
 
@@ -92,7 +111,9 @@ class DockerRunner:
         run_id = uuid.uuid4().hex
         directory = Path(directory) / run_id
         staging = directory / "input"
+        container_name = "ntpu-p3-" + run_id
         filesystem_path(staging).mkdir(parents=True)
+        command = self.command(image, container_name, staging)
         hashes = {}
         for name, data in inputs.items():
             if not re.fullmatch(r"[a-f0-9]{64}\.[a-z0-9]{1,8}", name) or len(data) > 10_000_000:
@@ -103,14 +124,12 @@ class DockerRunner:
         # Linux CI / rootless Docker must be able to read copies as the sandbox user.
         for path in [filesystem_path(directory), filesystem_path(staging), *filesystem_path(staging).iterdir()]:
             os.chmod(path, 0o755 if path.is_dir() else 0o644)
-        name = "ntpu-p3-" + run_id
         process = None
         started = time.monotonic()
         chunks, size, overflow = [], [0], threading.Event()
         try:
             if cancel.is_set():
                 fail("CANCELLED")
-            command = self.command(image, name, staging)
             command = self.engine_command() + command[1:]
             process = subprocess.Popen(command, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, creationflags=CREATE_FLAGS)
@@ -171,7 +190,7 @@ class DockerRunner:
         finally:
             if process:
                 try:
-                    subprocess.run([*self.engine_command(), "rm", "-f", name], timeout=10,
+                    subprocess.run([*self.engine_command(), "rm", "-f", container_name], timeout=10,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_FLAGS)
                 except (OSError, subprocess.TimeoutExpired):
                     pass

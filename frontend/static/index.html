@@ -49,7 +49,7 @@
     <form id="login-form">
       <label>選擇服務<select id="provider"><option value="moodle">Moodle 課程平台</option><option value="sis">校務系統</option><option value="ntpu-ai">NTPU AI</option></select></label>
       <div id="credential-fields"><label>學校帳號<input id="username" autocomplete="username" maxlength="200" required placeholder="輸入本人學校帳號"></label><label>密碼<span class="password-field"><input id="password" type="password" autocomplete="current-password" maxlength="300" required><button type="button" data-action="toggle-password" aria-label="顯示密碼" aria-pressed="false">顯示</button></span></label><button type="submit" class="button primary full">登入並連結</button></div>
-      <div id="ai-fields" hidden><p class="notice">在專用瀏覽器完成登入後，關閉登入視窗，再檢查連線。</p><button type="button" class="button primary full" data-action="ai-login">開啟 NTPU AI 登入視窗 ↗</button></div>
+      <div id="ai-fields" hidden><p class="notice">在專用瀏覽器完成登入後，關閉登入視窗，再檢查連線。</p><button type="button" class="button primary full" data-action="ai-login">開啟 NTPU AI 登入視窗 ↗</button><a id="ai-login-desktop" class="button full" hidden target="_blank" rel="noopener noreferrer" href="http://127.0.0.1:6080/vnc.html?autoconnect=true">前往 Docker 登入桌面 ↗</a></div>
     </form>
     <div class="button-row"><button class="button" data-action="check-connections">檢查連線</button><button class="button" data-action="restore-connection">恢復所選連線</button><button class="button quiet" data-action="logout">登出</button></div>
     <p id="connection-message" class="notice" role="status" hidden></p>

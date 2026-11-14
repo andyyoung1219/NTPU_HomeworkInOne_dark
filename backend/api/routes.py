@@ -1,18 +1,27 @@
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Header, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.agent.completion_revision import MAX_REVISION_FILES, MAX_UPLOAD_ENCODED
 from backend.agent.contracts import REGISTRY, AgentOptions
 from backend.agent.engine import RESUMABLE, resume_unavailable
 from backend.agent.runner import filesystem_path
 from backend.p0.ai import connection_status
 from backend.services.exports import export_extra
 from backend.services.study import StudyError, error_code
+from backend.services.submission import (
+    require_submission_content,
+    review_markdown,
+    stale_submission_exports,
+    submission_export_stale,
+    submission_markdown,
+)
 
 
 class LoginRequest(BaseModel):
@@ -79,6 +88,19 @@ class CompletionRequest(BaseModel):
     approved: bool = False
 
 
+class RevisionFile(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    data: str = Field(min_length=1, max_length=MAX_UPLOAD_ENCODED, repr=False)
+
+
+class RevisionRequest(BaseModel):
+    unit_id: str = Field(min_length=1, max_length=32)
+    mode: Literal["supplement", "result", "retry"]
+    notes: str = Field(default="", max_length=2400)
+    files: list[RevisionFile] = Field(default_factory=list, max_length=MAX_REVISION_FILES)
+    approved: bool = False
+
+
 class ProgressRequest(BaseModel):
     course_id: str | None = None
     assignment_id: str | None = None
@@ -99,6 +121,10 @@ def success(value):
     return {"data": value, "meta": {"timestamp": datetime.now(UTC).isoformat()}, "error": None}
 
 
+def task_with_exports(value):
+    return success({**value, "stale_exports": stale_submission_exports(value)})
+
+
 def routes(service):
     api = APIRouter()
 
@@ -116,12 +142,12 @@ def routes(service):
             "Content-Disposition": 'attachment; filename="diagnostics.json"'})
 
     @api.get("/dashboard")
-    def dashboard(live: bool = False):
-        return success(service.learning.dashboard(live=live))
+    def dashboard(live: bool = False, pending: bool = False):
+        return success(service.learning.dashboard(live=live, pending=pending))
 
     @api.get("/learning/courses/{course_id}")
-    def learning_course(course_id: str, live: bool = False):
-        return success(service.learning.course(course_id, live=live))
+    def learning_course(course_id: str, live: bool = False, pending: bool = False):
+        return success(service.learning.course(course_id, live=live, pending=pending))
 
     @api.get("/search")
     def search(q: str = "", course_id: str | None = None,
@@ -142,7 +168,7 @@ def routes(service):
 
     @api.post("/tasks/{task_id}/export-extra")
     def extra_export(task_id: str, body: ExportRequest):
-        return success(export_extra(service, task_id, body.kind, body.include_sources))
+        return task_with_exports(export_extra(service, task_id, body.kind, body.include_sources))
 
     @api.get("/tools")
     def tools():
@@ -152,8 +178,9 @@ def routes(service):
 
     @api.get("/connections")
     def connections():
-        return success({"moodle": "cached" if service.user else "disconnected",
-                        "sis": service.hub.sis.state if service.user and service.hub.sis_user == service.user else "disconnected",
+        user, _ = service.require_request_account()
+        return success({"moodle": "cached" if user else "disconnected",
+                        "sis": service.hub.sis.state if user and service.hub.sis_user == user else "disconnected",
                         "ntpu-ai": service.ai.rpc("login_status")})
 
     @api.post("/connections/moodle/start")
@@ -212,7 +239,10 @@ def routes(service):
         if not service.ai_lock.acquire(blocking=False):
             raise StudyError("AI_BUSY")
         try:
-            return success(service.ai.rpc("open_login"))
+            result = service.ai.rpc("open_login")
+            if os.environ.get("NTPU_AI_BRIDGE_STORAGE"):
+                result = {**result, "login_desktop": True}
+            return success(result)
         finally:
             service.ai_lock.release()
 
@@ -240,13 +270,15 @@ def routes(service):
 
     @api.get("/courses/{course_id}/assignments")
     def assignments(course_id: str, include_removed: bool = False):
-        service.get("course", course_id)
-        return success(service.assignments(course_id, include_removed=include_removed))
+        user = service.require_user()
+        service.get("course", course_id, user)
+        return success(service.assignments(course_id, include_removed=include_removed, user=user))
 
     @api.get("/assignments/{assignment_id}")
     def assignment(assignment_id: str):
-        value = service.get("assignment", assignment_id)
-        assets = [service.get("asset", ref) for ref in value["asset_ids"]]
+        user = service.require_user()
+        value = service.get("assignment", assignment_id, user)
+        assets = [service.get("asset", ref, user) for ref in value["asset_ids"]]
         return success({**value, "assets": assets})
 
     @api.post("/assignments/{assignment_id}/download")
@@ -271,14 +303,18 @@ def routes(service):
 
     @api.get("/tasks")
     def tasks():
-        return success(service.store.list(service.require_user(), "task"))
+        return success(service.maintenance.task_views())
 
     @api.get("/tasks/{task_id}")
     def task(task_id: str):
-        value = service.get("task", task_id)
+        value, = service.maintenance.task_views(task_id)
         if value["status"] in RESUMABLE:
             value = {**value, "resume_unavailable": resume_unavailable(value)}
-        return success(value)
+        return task_with_exports(value)
+
+    @api.delete("/tasks/{task_id}")
+    def delete_draft(task_id: str):
+        return success(service.maintenance.delete_draft(task_id))
 
     @api.post("/tasks/{task_id}/approve", status_code=202)
     def approve(task_id: str, body: ApproveRequest):
@@ -290,6 +326,10 @@ def routes(service):
         return success(service.agent.resume(task_id, body.request_sha256, body.code_execution_approved,
                                            body.external_research_approved))
 
+    @api.post("/tasks/{task_id}/revise", status_code=202)
+    def revise(task_id: str, body: RevisionRequest, idempotency_key: str = Header()):
+        return success(service.revise_completion(task_id, body.model_dump(), idempotency_key))
+
     @api.post("/tasks/{task_id}/cancel")
     def cancel(task_id: str):
         return success(service.cancel(task_id))
@@ -300,24 +340,27 @@ def routes(service):
 
     @api.post("/tasks/{task_id}/export")
     def export(task_id: str):
-        return success(service.export(task_id))
+        return task_with_exports(service.export(task_id))
 
     @api.get("/tasks/{task_id}/events")
     async def events(task_id: str, request: Request):
+        account = service.require_request_account()
         user = service.require_user()
-        service.get("task", task_id)
+        service.get("task", task_id, user)
 
         async def stream():
             cursor = 0
             for _ in range(900):
-                if await request.is_disconnected():
+                if await request.is_disconnected() or service.account != account:
                     return
                 items = service.store.events(user, task_id, cursor)
                 for item in items:
+                    if service.account != account:
+                        return
                     cursor = item["seq"]
                     yield f"id: {cursor}\ndata: {json.dumps(item)}\n\n"
-                current = service.get("task", task_id, user)
-                if current["status"] not in {"running", "planning", "exporting"}:
+                current = service.store.get(user, "task", task_id)
+                if current is None or current["status"] not in {"running", "planning", "exporting"}:
                     return
                 yield ": heartbeat\n\n"
                 await asyncio.sleep(1)
@@ -326,14 +369,29 @@ def routes(service):
     @api.get("/artifacts/{task_id}/download")
     def artifact(task_id: str, kind: str = "pdf"):
         import hashlib
-        task = service.get("task", task_id)
-        workspace = service.workspace(service.user, task_id)
+        user = service.require_user()
+        task = service.get("task", task_id, user)
+        workspace = service.workspace(user, task_id)
+        if kind in {"pdf", "docx", "zip", "manifest"}:
+            markdown = submission_markdown(task)
+            metadata = task.get("qa") if kind in {"pdf", "manifest"} else task.get("exports", {}).get(kind)
+            if metadata:
+                require_submission_content(task, markdown)
+            if submission_export_stale(task, markdown, metadata, kind):
+                raise StudyError("REEXPORT_REQUIRED")
         if kind == "pdf" and task.get("pdf"):
             path, mime = service.safe_path(task["pdf"]), "application/pdf"
             if hashlib.sha256(path.read_bytes()).hexdigest() != task.get("qa", {}).get("sha256"):
                 raise StudyError("ARTIFACT_CHANGED")
-        elif kind == "markdown" and task["draft"]:
-            path, mime = workspace / "work/report.md", "text/markdown"
+        elif kind in {"markdown", "checklist"}:
+            markdown = submission_markdown(task) if kind == "markdown" else review_markdown(task)
+            if not markdown.strip():
+                raise StudyError("ARTIFACT_NOT_AVAILABLE")
+            if kind == "markdown" and task["status"] in {"waiting_review", "completed"}:
+                require_submission_content(task, markdown)
+            name = "report.md" if kind == "markdown" else "review-checklist.md"
+            return Response(markdown, media_type="text/markdown",
+                            headers={"Content-Disposition": f'attachment; filename="{name}"'})
         elif kind == "manifest" and task.get("pdf"):
             path, mime = workspace / "output/manifest.json", "application/json"
         elif kind in {"docx", "zip"} and kind in task.get("exports", {}):
@@ -354,7 +412,9 @@ def routes(service):
     @api.get("/tasks/{task_id}/artifacts/{name}")
     def tool_artifact(task_id: str, name: str):
         import hashlib
-        task = service.get("task", task_id)
+        user = service.require_user()
+        task = service.get("task", task_id, user)
+        workspace = service.workspace(user, task_id)
         # Names are registry outputs, never filesystem paths supplied by a client.
         results = [{"artifacts": task.get("generated_files", {})}]
         results.extend(reversed(list(task.get("tool_results", {}).values())))
@@ -362,7 +422,7 @@ def routes(service):
             artifact = result.get("artifacts", {}).get(name)
             if artifact:
                 path = service.safe_path(artifact["path"])
-                if not path.resolve().is_relative_to(service.workspace(service.user, task_id).resolve()):
+                if not path.resolve().is_relative_to(workspace.resolve()):
                     raise StudyError("PATH_OUTSIDE_WORKSPACE")
                 path = filesystem_path(path)
                 if hashlib.sha256(path.read_bytes()).hexdigest() != artifact["sha256"]:
@@ -386,5 +446,6 @@ def routes(service):
 
 async def safe_exception(request, error):
     code = error_code(error)
-    status = 404 if code == "NOT_FOUND_OR_NOT_AUTHORIZED" else 409 if "CONFLICT" in code or code == "AI_BUSY" else 400
+    status = (404 if code == "NOT_FOUND_OR_NOT_AUTHORIZED" else
+              409 if "CONFLICT" in code or code in {"AI_BUSY", "ACCOUNT_CHANGED_RECONNECT", "DRAFT_NOT_DELETABLE"} else 400)
     return JSONResponse({"data": None, "error": {"code": code, "message": code}}, status_code=status)

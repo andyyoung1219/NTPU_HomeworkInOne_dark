@@ -1,4 +1,5 @@
 import atexit
+import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,11 +11,12 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.routes import routes, safe_exception
 from backend.p0.moodle import probe
-from backend.services.study import StudyError, StudyService, error_code
+from backend.services.study import RequestAccount, StudyError, StudyService, atomic_text, error_code
 
 PORT = 8766
 ORIGIN = f"http://127.0.0.1:{PORT}"
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "static"
+ACCOUNT_HEADER = "X-Workbench-Account"
 
 
 def create_app(service=None, key=None):
@@ -37,6 +39,9 @@ def create_app(service=None, key=None):
         # Never echo credentials in Pydantic validation errors.
         return JSONResponse({"error": {"code": "INVALID_REQUEST"}}, status_code=422)
 
+    async def account_changed(request):
+        return await safe_exception(request, StudyError("ACCOUNT_CHANGED_RECONNECT"))
+
     @app.middleware("http")
     async def protect(request: Request, call_next):
         if request.headers.get("host") != f"127.0.0.1:{PORT}":
@@ -46,10 +51,24 @@ def create_app(service=None, key=None):
         if request.url.path not in {"/health", f"/unlock/{key}"}:
             if not secrets.compare_digest(request.cookies.get("study_session", ""), key):
                 return JSONResponse({"error": "LOCAL_AUTH_REQUIRED"}, status_code=401)
+        account = RequestAccount(service.account) if request.url.path.startswith("/api/") else None
+        scope = request.headers.get(ACCOUNT_HEADER)
+        if scope is None and request.method == "GET":
+            scope = request.query_params.get("account_scope")
+        token = service.request_account.set(account)
         try:
-            response = await call_next(request)
+            if account is not None and scope is not None and scope != account.account[1]:
+                response = await account_changed(request)
+            else:
+                response = await call_next(request)
+                if account is not None and service.account != account.account:
+                    response = await account_changed(request)
+                elif account is not None:
+                    response.headers[ACCOUNT_HEADER] = account.account[1]
         except Exception as error:
-            return JSONResponse({"error": {"code": error_code(error)}}, status_code=500)
+            response = JSONResponse({"error": {"code": error_code(error)}}, status_code=500)
+        finally:
+            service.request_account.reset(token)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -58,7 +77,7 @@ def create_app(service=None, key=None):
 
     @app.get("/health")
     def health():
-        return {"ok": True, "version": "0.4.0", "phase": "P4"}
+        return {"ok": True, "version": "0.5.0-rc.1", "phase": "P4"}
 
     @app.get("/unlock/{provided}")
     def unlock(provided: str):
@@ -88,7 +107,8 @@ if __name__ == "__main__":
     service = StudyService()
     key = secrets.token_urlsafe(32)
     url = f"{ORIGIN}/unlock/{key}"
-    (service.root / "launch-url.txt").write_text(url, encoding="utf-8")
+    atomic_text(service.root / "launch-url.txt", url)
     atexit.register(service.close)
     print(f"NTPU Homework: {url}", flush=True)
-    uvicorn.run(create_app(service, key), host="127.0.0.1", port=PORT, access_log=False, log_level="critical")
+    uvicorn.run(create_app(service, key), host=os.environ.get("NTPU_BIND_HOST", "127.0.0.1"),
+                port=PORT, access_log=False, log_level="critical")

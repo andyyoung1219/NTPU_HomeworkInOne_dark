@@ -14,11 +14,11 @@ PRIVATE_DIRS = {
 }
 PRIVATE_NAMES = {
     "active-user.json", "diagnostics.json", "launch-url.txt", "prepared-live.json",
-    "report.html", "report.md", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+    "login-desktop-password", "report.html", "report.md", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
 }
 PRIVATE_SUFFIXES = {
     ".docx", ".dump", ".har", ".kdbx", ".key", ".log", ".p12", ".pdf",
-    ".pem", ".pfx", ".ttf", ".zip",
+    ".pem", ".pfx", ".tar", ".tgz", ".ttf", ".zip",
 }
 SECRET_PATTERNS = {
     "private key": r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----",
@@ -73,6 +73,7 @@ def private_path(name):
         not PRIVATE_DIRS.isdisjoint(path.parts)
         or path.name in PRIVATE_NAMES
         or path.suffix in PRIVATE_SUFFIXES
+        or path.name.endswith(".tar.gz")
         or ".sqlite" in path.name
         or (path.name == ".env" or path.name.startswith(".env.")) and path.name != ".env.example"
     )

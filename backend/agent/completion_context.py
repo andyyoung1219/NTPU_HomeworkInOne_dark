@@ -4,6 +4,12 @@ import json
 import re
 from itertools import zip_longest
 
+from backend.services.documents import (
+    REQUIREMENT_CLAUSE,
+    REQUIREMENT_LIST_PREFIX,
+    optional_requirement,
+)
+
 ASSIGNMENT = "assignment-description"
 SOURCE_HEADER = re.compile(r"^\[來源 ([A-Za-z0-9][A-Za-z0-9_:-]{0,79}) / 頁或節 ([^\]\r\n]{1,80})\]\r?\n", re.M)
 LOCATION_HINT = re.compile(
@@ -156,7 +162,8 @@ def planning_context(snapshot):
         excerpt, limited = excerpt_text([(chunk, chunk["file_id"] == ASSIGNMENT) for chunk in chunks], 10000,
                                         supplement_limit=3600)
         result = {"excerpt": excerpt, "assets": snapshot.get("assets", []), "context_limited": limited}
-    result["requirements"] = [{"id": item["id"], "text": wire_clip(item["text"], 220), "source": item["source"]}
+    result["requirements"] = [{"id": item["id"], "text": wire_clip(item["text"], 220), "source": item["source"],
+                               "optional": optional_requirement(item)}
                               for item in snapshot.get("requirements", [])]
     index = []
     available = 8000
@@ -174,3 +181,27 @@ def planning_context(snapshot):
                   assignment_context_limited=any(chunk["file_id"] == ASSIGNMENT and
                       chunk["text"].strip() not in result["excerpt"] for chunk in chunks))
     return result
+
+
+def grounded_actions(requirements, proposals):
+    """Use assignment excerpts as the action text and keep one action per requirement."""
+    mandatory = {item["id"]: item["text"] for item in requirements if not optional_requirement(item)}
+    actions = {}
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            continue
+        ref, quote = proposal.get("requirement_id"), proposal.get("quote")
+        if not isinstance(ref, str) or ref not in mandatory or not isinstance(quote, str):
+            continue
+        quote = " ".join(REQUIREMENT_LIST_PREFIX.sub("", quote).split()).strip(" 。；;")
+        clauses = REQUIREMENT_CLAUSE.split(REQUIREMENT_LIST_PREFIX.sub("", mandatory[ref]))
+        if (4 <= len(quote) <= 500 and not optional_requirement({"text": quote})
+                and any(quote in " ".join(clause.split()) and not optional_requirement({"text": clause})
+                        for clause in clauses)):
+            actions.setdefault(ref, quote)
+    return actions
+
+
+def format_grounded_action(ref, quote, english):
+    return (f"Complete the assignment requirement ({ref}): {quote}" if english
+            else f"請完成題目要求（{ref}）。{quote}")

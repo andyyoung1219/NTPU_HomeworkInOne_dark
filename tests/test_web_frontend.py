@@ -2,14 +2,16 @@
 
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
 from test_mvp import service as service
 from test_mvp import task_request
 
-from backend.main import ORIGIN, create_app
+from backend.main import ACCOUNT_HEADER, ORIGIN, create_app
 
 
 def test_backend_import_does_not_load_gradio():
@@ -39,6 +41,63 @@ def test_authenticated_static_app_and_asset_boundaries(service):
         assert client.get(path).status_code == 404
     assert client.get("/static/app.js", headers={"Origin": "https://other.example"}).status_code == 403
     assert client.get("/", headers={"Host": "other.example"}).status_code == 403
+
+
+def test_hub_request_keeps_account_and_rejects_response_after_switch(service, monkeypatch):
+    client = TestClient(create_app(service, "account-test"), base_url=ORIGIN)
+    client.get("/unlock/account-test", follow_redirects=False)
+    old_user, new_user = service.user, "c" * 24
+    old_scope = client.get("/api/courses").headers[ACCOUNT_HEADER]
+    timetable_started, resume = threading.Event(), threading.Event()
+    observed_users = []
+    get = service.store.get
+
+    def read(user, kind, identifier):
+        if kind == "hub" and identifier.startswith("sis:"):
+            observed_users.append(user)
+            if identifier == "sis:timetable" and not timetable_started.is_set():
+                timetable_started.set()
+                assert resume.wait(5)
+        return get(user, kind, identifier)
+
+    monkeypatch.setattr(service.store, "get", read)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(client.get, "/api/hub", headers={ACCOUNT_HEADER: old_scope})
+        try:
+            assert timetable_started.wait(5)
+            service.user = new_user
+        finally:
+            resume.set()
+        response = request.result(timeout=5)
+
+    assert observed_users == [old_user] * 4
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "ACCOUNT_CHANGED_RECONNECT"
+    assert response.json()["data"] is None
+    assert client.get("/api/hub", headers={ACCOUNT_HEADER: old_scope}).status_code == 409
+    assert client.get("/api/maintenance/diagnostics", params={"account_scope": old_scope}).status_code == 409
+    assert client.get("/api/courses").headers[ACCOUNT_HEADER] != old_scope
+
+
+def test_account_change_can_finish_its_own_request_but_old_tab_cannot_save(service, monkeypatch):
+    client = TestClient(create_app(service, "account-test"), base_url=ORIGIN)
+    client.get("/unlock/account-test", follow_redirects=False)
+    old_scope = client.get("/api/courses").headers[ACCOUNT_HEADER]
+    user = "c" * 24
+
+    def adopt():
+        service.activate_user(user)
+        return user
+
+    monkeypatch.setattr(service, "adopt_vault", adopt)
+    monkeypatch.setattr(service, "sync_courses", lambda: [{"id": service.require_user()}])
+    result = client.post("/api/connections/moodle/restore", headers={ACCOUNT_HEADER: old_scope})
+    assert result.status_code == 200
+    assert result.json()["data"] == [{"id": user}]
+    assert result.headers[ACCOUNT_HEADER] != old_scope
+    stale_save = client.put("/api/workflow/progress", json={}, headers={ACCOUNT_HEADER: old_scope})
+    assert stale_save.status_code == 409
+    assert service.store.get(user, "preferences", "workflow") is None
 
 
 @pytest.mark.parametrize("endpoint", ["start", "restore"])

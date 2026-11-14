@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from test_mvp import FakeAI
+from test_mvp import FakeAI, task_request
 from test_mvp import service as service
 
 from backend.main import ORIGIN, create_app
@@ -70,6 +70,86 @@ def test_active_job_blocks_deletion(service):
             erase(service)
     finally:
         service.active_jobs.clear()
+
+
+def test_delete_one_draft_removes_only_its_local_data(service):
+    user, other = service.user, 'c' * 24
+    client = TestClient(create_app(service, 'draft-delete'), base_url=ORIGIN)
+    client.get('/unlock/draft-delete', follow_redirects=False)
+    draft = {'id': 'draft', 'title': 'Unfinished draft', 'status': 'waiting_review',
+             'draft': 'Discard this draft', 'assignment_id': '2'}
+    service.store.save_many(user, [
+        ('task', 'draft', draft),
+        ('task', 'child', {**draft, 'id': 'child', 'revision': {'parent_task_id': 'draft'}}),
+        ('task', 'exported', {**draft, 'id': 'exported'}),
+        ('task', 'running', {**draft, 'id': 'running', 'status': 'running'}),
+        ('task', 'failed', {**draft, 'id': 'failed', 'status': 'failed', 'draft': ''}),
+        ('preferences', 'workflow', {'assignment_id': '2', 'course_id': '1', 'task_id': 'draft',
+                                     'selected_asset_ids': [], 'page': 'review', 'editor': draft['draft']}),
+    ])
+    service.store.save(other, 'task', 'foreign', {**draft, 'id': 'foreign'})
+    for owner, task_id in ((user, 'draft'), (user, 'child'), (user, 'exported'), (other, 'foreign')):
+        atomic_text(service.workspace(owner, task_id) / 'work/report.md', task_id)
+    service.store.event(user, 'draft', 'waiting_review')
+    service.store.event(user, 'exported', 'exported_docx')
+    service.learning.rebuild_index()
+
+    tasks = {task['id']: task for task in client.get('/api/tasks').json()['data']}
+    assert tasks['draft']['can_delete_draft'] and tasks['failed']['can_delete_draft']
+    assert tasks['child']['revision_parent_available']
+    assert not tasks['exported']['can_delete_draft'] and not tasks['running']['can_delete_draft']
+    assert client.delete('/api/tasks/exported').status_code == 409
+    assert client.delete('/api/tasks/running').status_code == 409
+    assert client.delete('/api/tasks/foreign').status_code == 404
+    assert client.delete('/api/tasks/draft').json()['data'] == {'deleted': True}
+    assert client.delete('/api/tasks/draft').json()['data'] == {'deleted': True}
+    assert client.get('/api/tasks/draft').status_code == 404
+    assert client.get('/api/artifacts/draft/download?kind=markdown').status_code == 404
+    assert not service.workspace(user, 'draft').exists()
+    assert not service.store.events(user, 'draft')
+    assert (service.root / 'source.pdf').is_file()
+    for owner, task_id in ((user, 'child'), (user, 'exported'), (other, 'foreign')):
+        assert (service.workspace(owner, task_id) / 'work/report.md').read_text() == task_id
+    with service.store.connection() as db:
+        assert db.execute("SELECT 1 FROM learning_search WHERE kind='task' AND ref='draft'").fetchone() is None
+    progress = client.get('/api/workflow/progress').json()['data']
+    assert progress['task_id'] is None and progress['editor'] == ''
+    child = client.get('/api/tasks/child').json()['data']
+    assert child['revision']['parent_task_id'] == 'draft' and not child['revision_parent_available']
+    assert client.delete('/api/tasks/failed').json()['data'] == {'deleted': True}
+
+
+def test_draft_cleanup_resumes_after_restart_and_blocks_replayed_creation(service, monkeypatch):
+    import backend.services.maintenance as maintenance
+
+    user = service.user
+    request = task_request(service)
+    task = service.create_task(request, 'original-request')
+    task_id = task['id']
+    service.cancel(task_id)
+    workspace = service.workspace(user, task_id)
+
+    def locked(*args):
+        raise PermissionError('locked')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(maintenance.shutil, 'rmtree', locked)
+        with pytest.raises(PermissionError):
+            service.maintenance.delete_draft(task_id)
+    assert workspace.exists()
+    assert service.store.get(user, 'task', task_id) is None
+    with pytest.raises(StudyError, match='NOT_FOUND_OR_NOT_AUTHORIZED'):
+        service.create_task(request, 'original-request')
+
+    restarted = StudyService(service.root, FakeAI())
+    try:
+        assert not workspace.exists()
+        assert restarted.maintenance.delete_draft(task_id) == {'deleted': True}
+        with pytest.raises(StudyError, match='NOT_FOUND_OR_NOT_AUTHORIZED'):
+            restarted.create_task(request, 'original-request')
+        assert restarted.create_task(request, 'new-request')['id'] != task_id
+    finally:
+        restarted.close()
 
 
 def test_failed_delete_stays_hidden_and_resumes_after_restart(service, monkeypatch):

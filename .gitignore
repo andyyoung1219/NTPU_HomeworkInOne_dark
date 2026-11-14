@@ -20,6 +20,9 @@ browser-profiles/
 *.pdf
 *.docx
 *.zip
+*.[tT][aA][rR]
+*.[tT][gG][zZ]
+*.[tT][aA][rR].[gG][zZ]
 *.ttf
 *.pem
 *.key
@@ -36,5 +39,6 @@ report.md
 report.html
 diagnostics.json
 launch-url.txt
+[lL][oO][gG][iI][nN]-[dD][eE][sS][kK][tT][oO][pP]-[pP][aA][sS][sS][wW][oO][rR][dD]
 active-user.json
 prepared-live.json

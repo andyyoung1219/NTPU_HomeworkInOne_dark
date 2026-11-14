@@ -3,6 +3,8 @@
 主機 `http://127.0.0.1:8766`。先開啟啟動時產生的 `/unlock/<key>` 取得 HttpOnly session
 cookie。所有 `/api/*` 需要相同 cookie；非同源 Origin 與未知 Host 拒絕。
 JSON 回覆使用 `data / meta / error`；例外只回固定代碼，不回原始回應或 stack trace。
+前端會將回應的 `X-Workbench-Account` 帶到後續請求，用來辨識登入狀態是否已在另一個分頁變更。下載連結使用
+`account_scope` 查詢參數。工作台拒絕已失效的範圍，回傳 `409 ACCOUNT_CHANGED_RECONNECT`。
 
 | Method | 路徑 | 用途 |
 | --- | --- | --- |
@@ -22,14 +24,16 @@ JSON 回覆使用 `data / meta / error`；例外只回固定代碼，不回原�
 | POST | `/api/assignments/{id}/complete` | `{"approved":true}` 與 `Idempotency-Key`；直接完成所選作業，回傳 202 |
 | GET | `/api/assets/{id}/preview` | 本人原始附件下載／檢視 |
 | POST | `/api/tasks` | 建立任務，必帶 Idempotency-Key header，回傳 202 |
-| GET | `/api/tasks` | 本人任務歷史 |
-| GET | `/api/tasks/{id}` | 狀態與草稿 |
+| GET | `/api/tasks` | 本人任務歷史，含 `can_delete_draft` |
+| GET | `/api/tasks/{id}` | 狀態、草稿與 `can_delete_draft` |
+| DELETE | `/api/tasks/{id}` | 刪除本人已停止且未匯出的草稿與本機任務產物 |
 | POST | `/api/tasks/{id}/approve` | 以 request_sha256 核准當次快照 |
 | POST | `/api/tasks/{id}/cancel` | 停止任務 |
+| POST | `/api/tasks/{id}/revise` | 在新版本補跑指定階段及其下游，保留其他成果 |
 | GET | `/api/tasks/{id}/events` | SSE，事件只含狀態與固定錯誤碼 |
 | PUT | `/api/tasks/{id}/draft` | 保存 Markdown；reviewed 預設 false |
 | POST | `/api/tasks/{id}/export` | 僅匯出已審閱版本 |
-| GET | `/api/artifacts/{task_id}/download?kind=pdf` | PDF；kind 可選 markdown/manifest |
+| GET | `/api/artifacts/{task_id}/download?kind=pdf` | 繳交用 PDF；kind 可選 markdown、manifest、checklist，待辦獨立下載 |
 
 建立任務需含 assignment_id、excerpt；mode 預設 report_draft，可附 selected_asset_ids、
 instruction 與 requirements。data_transfer_approved 預設 false；只有明確 true 才開始送模型。
@@ -62,10 +66,12 @@ P3 的 code execution/external research 需要獨立核准，詳見下節。
 
 任務回覆包含 `completion.status`（running、complete、needs_action 或 blocked）、`completion.required_actions`、`completion.blockers` 與
 `checkpoint.consecutive_errors`。有可用成果時任務狀態為 `waiting_review`，由前端自動開啟審閱頁。
-非致命缺漏與使用者操作存入 `completion.required_actions`，並依報告語言附在正文末尾；狀態為 `needs_action`。
+非致命缺漏與使用者操作存入 `completion.required_actions`，狀態為 `needs_action`。工作台顯示這些事項，亦可用 `kind=checklist` 下載獨立文件。
 `completion.blockers` 用於真正無法繼續生成的停止原因。舊模型回覆的 blockers／unresolved 若屬待辦，會保留內容並轉入使用者待辦，不因有待辦而反覆重試整份報告。
 `task.blockers` 仍保存待處理項目作為匯出接受門檻；有待辦時須以 `reviewed=true`、`accept_incomplete=true` 保存草稿，才可使用既有匯出 API。
 成果提供具體解答、設計或分析，並依題目指定語言撰寫；提案與已執行實驗分別以相應證據敘述。
+
+補跑需 `Idempotency-Key` 並傳入 `unit_id`、`mode` 與 `approved=true`。`retry` 沿用已保存的資料，以空 `files` 和 `notes` 執行。`supplement` 先附加新資料，`result` 則提供自行完成的成果供下游使用。產出新版本後仍可查看原任務。
 
 資料來源包括本次作業附件、內建 UCI 公開資料集，以及題目文字明示的 UCI 編號。直接模式將公開文獻查證列入待辦，完成其餘可用成果。
 Crossref 或 Europe PMC 的確切查詢字串須在逐步模式中明確核准。

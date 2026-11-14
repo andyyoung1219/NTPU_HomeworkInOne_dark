@@ -4,12 +4,15 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
 import threading
 import time
 import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
@@ -17,10 +20,16 @@ from backend.integrations.moodle import MoodleClient
 from backend.models.store import Store, now
 from backend.p0.ai import AIAdapter, AIError
 from backend.p0.evidence import ROOT
-from backend.p0.moodle import MoodleProbe, Vault, probe, validate_url
+from backend.p0.moodle import MoodleProbe, Vault, ephemeral_vault_enabled, probe, validate_url
 from backend.services.data_hub import DataHub, course_metadata
 from backend.services.documents import assignment_text, parse, plain_html, requirements
 from backend.services.reports import render_pdf
+from backend.services.submission import (
+    guided_notice,
+    guided_review_block,
+    require_submission_content,
+    submission_markdown,
+)
 
 WORKFLOW_MODES = {"summary": "摘要題目", "plan": "提出解題規劃", "report_draft": "產生報告草稿",
                   "code_solution": "程式解題"}
@@ -28,6 +37,7 @@ MODES = {**WORKFLOW_MODES,
          "complete_assignment": "直接完成作業",
          "literature_comparison": "文獻比較", "csv_analysis": "CSV 分析與圖表", "coding_test": "程式測試"}
 TERMINAL = {"waiting_review", "completed", "failed", "cancelled", "blocked_auth", "partial"}
+ATTACHMENT_CACHE_FIELDS = {"path", "sha256", "downloaded_at", "chunks", "flags", "parser_version"}
 
 
 class StudyError(Exception):
@@ -77,9 +87,14 @@ def synchronized(method):
     return call
 
 
+@dataclass
+class RequestAccount:
+    account: tuple[str | None, str]
+
+
 class StudyService:
     def __init__(self, root=None, adapter=None):
-        self.root = Path(root or ROOT / ".local/app")
+        self.root = Path(root or os.environ.get("NTPU_APP_DATA_DIR") or ROOT / ".local/app")
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.root / "study.sqlite3")
         self.ai = adapter or AIAdapter()
@@ -90,9 +105,10 @@ class StudyService:
         )
         self.moodle.client = MoodleClient()
         self.hub = DataHub(self)
-        self.user = None
+        self._account = (None, secrets.token_urlsafe(24))
+        self.request_account = ContextVar("request_account", default=None)
         self.active_path = self.root / "active-user.json"
-        if self.active_path.exists():
+        if not ephemeral_vault_enabled() and self.active_path.exists():
             try:
                 value = json.loads(self.active_path.read_text(encoding="utf-8"))
                 if not isinstance(value, dict):
@@ -127,16 +143,43 @@ class StudyService:
                     self.store.save(user, "task", task["id"], task)
                     self.store.event(user, task["id"], "interrupted", "APP_RESTARTED_REVIEW_REQUIRED")
 
+    @property
+    def user(self):
+        return self._account[0]
+
+    @user.setter
+    def user(self, user):
+        if user != self._account[0]:
+            self._account = (user, secrets.token_urlsafe(24))
+
+    @property
+    def account(self):
+        return self._account
+
+    def require_request_account(self):
+        account = self._account
+        request = self.request_account.get()
+        if request is not None and request.account != account:
+            raise StudyError("ACCOUNT_CHANGED_RECONNECT")
+        return account
+
+    def activate_user(self, user):
+        self.user = user
+        if request := self.request_account.get():
+            request.account = self._account
+
     def require_user(self):
-        if not self.user:
+        user, _ = self.require_request_account()
+        if not user:
             raise StudyError("MOODLE_LOGIN_REQUIRED")
         with self.store.connection() as db:
-            if db.execute("SELECT 1 FROM account_deletions WHERE user_id=?", (self.user,)).fetchone():
+            if db.execute("SELECT 1 FROM account_deletions WHERE user_id=?", (user,)).fetchone():
                 raise StudyError("ACCOUNT_DELETION_PENDING")
-        return self.user
+        return user
 
     @synchronized
     def adopt_vault(self):
+        self.require_request_account()
         saved = Vault().operation("load", probe.account_key("p0"))
         if not saved:
             raise StudyError("MOODLE_LOGIN_REQUIRED")
@@ -150,12 +193,13 @@ class StudyService:
             self.moodle.assignments.clear()
             self.moodle.assets.clear()
             self.moodle.downloaded.clear()
-        self.user = user
         atomic_text(self.active_path, json.dumps({"user_id": user}))
+        self.activate_user(user)
         return user
 
     @synchronized
     def login(self, username, password):
+        self.require_request_account()
         if self.active_jobs:
             raise StudyError("TASK_RUNNING")
         self.moodle.login(username, password)
@@ -254,10 +298,16 @@ class StudyService:
                         continue
                     validate_url(item["fileurl"], resolve=False)
                     old = self.store.get(user, "asset", ref) or {}
-                    asset = {**old, "id": ref, "assignment_id": key, "name": item["filename"],
-                             "size_bytes": item.get("filesize"), "mime_type": item.get("mimetype", ""),
-                             "source_url": item["fileurl"], "source": "moodle",
-                             "last_synced_at": now(), "status": old.get("status", "not_downloaded")}
+                    metadata = {"name": item["filename"], "size_bytes": item.get("filesize"),
+                                "modified_at": item.get("timemodified"),
+                                "mime_type": item.get("mimetype", ""), "source_url": item["fileurl"]}
+                    # Require a matching remote revision before carrying forward cached bytes.
+                    if not metadata["modified_at"] or any(old.get(k) != value for k, value in metadata.items()):
+                        old = {k: value for k, value in old.items() if k not in ATTACHMENT_CACHE_FIELDS}
+                        old.pop("status", None)
+                    asset = {**old, **metadata, "id": ref, "assignment_id": key,
+                             "source": "moodle", "last_synced_at": now(),
+                             "status": old.get("status", "not_downloaded")}
                     records.append(("asset", ref, asset))
                     asset_ids.append(ref)
                 records.append(("assignment", key, {"id": key, "course_id": course_id,
@@ -279,8 +329,8 @@ class StudyService:
                 self.store.save(user, "assignment", assignment["id"], assignment)
             raise
 
-    def assignments(self, course_id, include_removed=False):
-        return [a for a in self.store.list(self.require_user(), "assignment") if a["course_id"] == course_id
+    def assignments(self, course_id, include_removed=False, *, user=None):
+        return [a for a in self.store.list(user or self.require_user(), "assignment") if a["course_id"] == course_id
                 and (include_removed or not a.get("removed"))]
 
     @synchronized
@@ -292,18 +342,27 @@ class StudyService:
         self.verify_identity()
         for ref in dict.fromkeys(asset_ids):
             asset = self.get("asset", ref)
-            if asset.get("path"):
+            source_url = asset.get("source_url")
+            local_only = not source_url and asset.get("source") != "moodle"
+            if asset.get("path") and (asset.get("modified_at") or local_only):
                 path = self.safe_path(asset["path"])
-                if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == asset.get("sha256"):
-                    continue
+                if path.is_file():
+                    cached = path.read_bytes()
+                    size = asset.get("size_bytes")
+                    if (size is None or len(cached) == size) and hashlib.sha256(cached).hexdigest() == asset.get("sha256"):
+                        continue
+            if not source_url:
+                raise StudyError("ASSET_CHANGED" if asset.get("path") else "ASSET_NOT_DOWNLOADED")
             self.moodle.assets[ref] = {"assignment_id": assignment_id, "filename": asset["name"],
-                "fileurl": asset["source_url"], "filesize": asset["size_bytes"]}
+                "fileurl": source_url, "filesize": asset.get("size_bytes")}
             self.moodle.download_dir = self.root / "incoming" / user
             result = self.moodle.download(ref)
             suffix = Path(asset["name"]).suffix.lower()
             target = self.root / "assets" / user / (result["sha256"] + suffix)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(result["path"], target)
+            for field in ATTACHMENT_CACHE_FIELDS:
+                asset.pop(field, None)
             if result.get("chunks"):
                 parsed_chunks = [{**chunk, "file_id": ref} for chunk in result["chunks"]]
                 parsed_flags = list(dict.fromkeys(flag for chunk in parsed_chunks for flag in chunk.get("extraction_flags", [])))
@@ -319,6 +378,7 @@ class StudyService:
             raise StudyError("PATH_OUTSIDE_WORKSPACE")
         return path
 
+    @synchronized
     def parse_assignment(self, assignment_id, asset_ids):
         user = self.require_user()
         assignment = self.get("assignment", assignment_id)
@@ -358,14 +418,14 @@ class StudyService:
             raise StudyError("USE_COMPLETION_ENDPOINT")
         if mode not in MODES:
             raise StudyError("INVALID_MODE")
-        assignment = self.get("assignment", request["assignment_id"])
+        assignment = self.get("assignment", request["assignment_id"], user)
         selected = list(dict.fromkeys(request.get("selected_asset_ids", [])))
         if set(selected) - set(assignment["asset_ids"]):
             raise StudyError("ASSET_SCOPE_MISMATCH")
         description = assignment.get("description", "")
         if not selected and not description.strip():
             raise StudyError("ASSIGNMENT_TEXT_NOT_AVAILABLE")
-        assets = [self.get("asset", ref) for ref in selected]
+        assets = [self.get("asset", ref, user) for ref in selected]
         if any(asset.get("status") != "parsed" for asset in assets):
             raise StudyError("ASSET_NOT_PARSED")
         excerpt = request.get("excerpt", "")
@@ -385,6 +445,10 @@ class StudyService:
         digest = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
         identifier = uuid.uuid5(uuid.NAMESPACE_URL, user + ":" + idempotency_key).hex
         with self.lock:
+            if self.require_user() != user:
+                raise StudyError("ACCOUNT_CHANGED_RECONNECT")
+            if self.store.get(user, "draft_deletion", identifier):
+                raise StudyError("NOT_FOUND_OR_NOT_AUTHORIZED")
             existing = self.store.get(user, "task", identifier)
             if existing:
                 if existing["request_sha256"] != digest:
@@ -432,6 +496,10 @@ class StudyService:
         from backend.agent.completion import create_completion
         return create_completion(self, assignment_id, idempotency_key)
 
+    def revise_completion(self, task_id, body, idempotency_key):
+        from backend.agent.completion_revision import start_revision
+        return start_revision(self, task_id, body, idempotency_key)
+
     def approve(self, task_id, snapshot_hash, high=False, external=False, resume=False):
         user = self.require_user()
         with self.lock:
@@ -446,21 +514,28 @@ class StudyService:
                     raise StudyError("PLAN_CHANGED")
                 if task["request"]["allow_code_execution"] and not high:
                     raise StudyError("CODE_APPROVAL_REQUIRED")
-                if task["request"]["allow_external_research"] and not external:
+                if task["request"]["allow_external_research"] and not external and not task.get("revision"):
                     raise StudyError("EXTERNAL_APPROVAL_REQUIRED")
                 requires_runner = task["request"]["allow_code_execution"] and (
                     task["request"]["mode"] != "complete_assignment" or
                     task.get("completion_plan", {}).get("needs_execution", False))
-                if requires_runner and not self.agent.runner.status()["available"]:
+                if requires_runner and not task.get("revision") and not self.agent.runner.status()["available"]:
                     raise StudyError("SANDBOX_NOT_AVAILABLE")
                 if resume and time.time() > task["deadline_at"]:
                     raise StudyError("TASK_DEADLINE_EXCEEDED")
                 task["deadline_at"] = task.get("deadline_at") or deadline(task["request"]["agent"])
-                task["approvals"] = {"high": high, "external": external, "snapshot": snapshot_hash,
+                task["approvals"] = {"high": high, "external": external and not task.get("revision"), "snapshot": snapshot_hash,
                                      "approved_at": now()}
+            revision = task.get("revision")
+            if revision:
+                from backend.agent.completion_revision import verify_revision_source
+
             for ref, expected in task["source_hashes"].items():
                 if ref.startswith(("crossref:", "research:")):
                     continue  # Runtime evidence, not an input snapshot.
+                if revision:
+                    verify_revision_source(self, user, task, ref, expected)
+                    continue
                 if ref == "assignment-description":
                     current = self.get("assignment", task["assignment_id"])["description"].encode()
                 elif ref.startswith("dataset:") and task["request"]["mode"] == "complete_assignment":
@@ -471,6 +546,8 @@ class StudyService:
                     current = self.safe_path(dataset["path"]).read_bytes()
                 else:
                     asset = self.get("material", ref.removeprefix("material:")) if ref.startswith("material:") else self.get("asset", ref)
+                    if not asset.get("path"):
+                        raise StudyError("ASSET_CHANGED")
                     current = self.safe_path(asset["path"]).read_bytes()
                 if hashlib.sha256(current).hexdigest() != expected:
                     raise StudyError("ASSET_CHANGED")
@@ -517,13 +594,15 @@ class StudyService:
             from backend.services.visual import VISUAL_GUIDANCE, task_attachment
             prompt += "\n" + VISUAL_GUIDANCE + "\n" + json.dumps(task.get("visual_input", {}), ensure_ascii=False)
             if isinstance(self.ai, AIAdapter):
-                bridge_id, future = self.ai.begin(prompt, attachment=task_attachment(self, task))
+                job["bridge_id"] = "draft-" + uuid.uuid4().hex
+                bridge_id, future = self.ai.begin(prompt, task_id=job["bridge_id"], cancel=job["cancel"],
+                                                  attachment=task_attachment(self, task))
             else:
                 bridge_id, future = self.ai.begin(prompt)
             job["bridge_id"] = bridge_id
             task["model_task_id"] = bridge_id
             if job["cancel"].is_set():
-                self.ai.rpc("cancel_task", task_id=bridge_id)
+                self._cancel_bridge(bridge_id)
             text = future.result(timeout=370)
             if job["cancel"].is_set():
                 raise StudyError("CANCELLED")
@@ -536,10 +615,7 @@ class StudyService:
         except Exception as error:
             code = error_code(error)
             if job["bridge_id"]:
-                try:
-                    self.ai.rpc("cancel_task", task_id=job["bridge_id"])
-                except Exception:
-                    pass
+                self._cancel_bridge(job["bridge_id"])
             task.update(status="cancelled" if code == "CANCELLED" else "blocked_auth" if code == "AI_AUTH_REQUIRED" else "partial" if task["draft"] else "failed",
                         error=code)
         finally:
@@ -599,31 +675,14 @@ class StudyService:
                 draft += f"## {sources_heading}\n\n" + "\n".join(
                     f"- {task.get('source_names', {}).get(ref, ref)} ({ref})" for ref in model["sources"])
                 draft += "\n"
-            completion = model.get("completion", {})
-            actions = list(dict.fromkeys(item.strip() for item in (
-                completion.get("required_actions", []) + model["unresolved"] + completion.get("blockers", [])
-            ) if item.strip()))
-            if actions:
-                if actions_heading is None:
-                    body = model["title"] + "".join(section["heading"] + section["content"]
-                                                   for section in model["sections"])
-                    actions_heading = "使用者待辦" if re.search(r"[\u3400-\u9fff]", body) else "Required user actions"
-                actions_heading = re.sub(r"([\\`*_{}\[\]<>#|])", r"\\\1", actions_heading.strip())
-                draft += f"\n## {actions_heading}\n\n" + "\n".join(f"- {item}" for item in actions) + "\n"
-            return draft, model
+            return submission_markdown({**task, "report_model": model}, draft), model
         if task.get("course_name"):
             draft += f"課程：{task['course_name']}\n\n作業：{task['title']}\n\n"
-        if task.get("runs"):
-            draft += "> AI 協作草稿。程式執行範圍以附錄 run_id 與工具證據為準；推論與作業要求仍需本人核對。\n\n"
-        elif task.get("request", {}).get("mode") == "code_solution":
-            draft += "> AI 產生的程式解題草稿。程式尚未執行，請審閱程式並驗證測試案例。\n\n"
-        else:
-            draft += "> AI 協作草稿。尚未執行程式或實驗；所有實作與數據須由本人完成及核對。\n\n"
+        draft += guided_notice(task) + "\n\n"
         for section in model["sections"]:
             draft += f"## {section['heading']}\n\n{section['content']}\n\n"
         draft += "## 來源\n\n" + "\n".join(f"- {task.get('source_names', {}).get(ref, ref)}（{ref}）" for ref in model["sources"])
-        draft += "\n\n## 待補與人工核對\n\n" + "\n".join(f"- TODO：{item}" for item in model["unresolved"])
-        draft += "\n- TODO：核對所有題目要求、引用與未執行的實驗。\n"
+        draft += "\n\n" + guided_review_block(model) + "\n"
         return draft, model
 
     def workspace(self, user, task_id):
@@ -682,8 +741,10 @@ class StudyService:
                         task["generated_files"][f"deliverable-{unit_id}.py"] = program
         return path
 
+    @synchronized
     def cancel(self, task_id):
-        task = self.get("task", task_id)
+        user = self.require_user()
+        task = self.get("task", task_id, user)
         job = self.active_jobs.get(task_id)
         if job:
             job["cancel"].set()
@@ -691,7 +752,7 @@ class StudyService:
                 threading.Thread(target=self._cancel_bridge, args=(job["bridge_id"],), daemon=True).start()
         elif task["status"] == "waiting_approval":
             task["status"] = "cancelled"
-            self.store.save(self.user, "task", task_id, task)
+            self.store.save(user, "task", task_id, task)
         return task
 
     def _cancel_bridge(self, bridge_id):
@@ -735,39 +796,22 @@ class StudyService:
                 raise StudyError("REVIEW_REQUIRED")
             if task.get("plan") and not task.get("ready_for_export"):
                 raise StudyError("INCOMPLETE_ACCEPTANCE_REQUIRED")
+            markdown = submission_markdown(task)
+            require_submission_content(task, markdown)
             task["status"] = "exporting"
             self.store.save(user, "task", task_id, task)
         output = self.workspace(user, task_id) / "output"
         export_started = now()
         try:
-            images = {}
-            if task.get("plan", {}).get("deliverables"):
-                from backend.agent.completion_units import verified_bytes
-                from backend.agent.runner import filesystem_path
+            from backend.services.exports import task_images
 
-                workspace = self.workspace(user, task_id)
-                for step_id, result in task["tool_results"].items():
-                    if step_id.startswith("unit-") and result.get("status") == "verified":
-                        for name, artifact in result.get("artifacts", {}).items():
-                            if name.endswith(".png"):
-                                verified_bytes(self, workspace, artifact)
-                                images[name] = filesystem_path(self.safe_path(artifact["path"]))
-            if task.get("statistics_verified"):
-                for result in task.get("tool_results", {}).values():
-                    if not result.get("independently_verified"):
-                        continue
-                    chart = result.get("artifacts", {}).get("chart.png")
-                    if chart:
-                        path = self.safe_path(chart["path"])
-                        if hashlib.sha256(path.read_bytes()).hexdigest() != chart["sha256"]:
-                            raise StudyError("ARTIFACT_CHANGED")
-                        images["chart.png"] = path
-            qa = render_pdf(task["draft"], output / "report.pdf", images=images)
+            qa = render_pdf(markdown, output / "report.pdf", images=task_images(self, task))
+            qa["submission_sha256"] = hashlib.sha256(markdown.encode()).hexdigest()
             if task.get("plan"):
                 for tool, result in (("render_pdf", qa["sha256"]), ("validate_pdf", qa)):
                     task["tool_audit"].append({"tool": tool, "step_id": "human-export", "attempt": 1,
                         "success": True, "started_at": export_started, "finished_at": now(),
-                        "input_sha256": hashlib.sha256(task["draft"].encode()).hexdigest(),
+                        "input_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
                         "result": result, "artifact_hashes": {"report.pdf": qa["sha256"]}})
             manifest = {"schema_version": 1, "source_hashes": task["source_hashes"],
                         "request_sha256": task["request_sha256"], "model_task_id": task.get("model_task_id"),
@@ -786,6 +830,9 @@ class StudyService:
                     experiments_executed=any(r["exit_code"] == 0 for r in task.get("runs", [])),
                     statistics_verified=task.get("statistics_verified", False), coverage=task.get("coverage", []),
                     accepted_incomplete=task.get("accepted_incomplete", False), blockers=task.get("blockers", []))
+            if revision := task.get("revision"):
+                manifest["revision"] = {key: revision[key] for key in
+                                        ("parent_task_id", "unit_id", "mode", "affected_unit_ids")}
             atomic_text(output / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             task.update(status="completed", pdf=str((output / "report.pdf").relative_to(self.root)), qa=qa, error=None)
         except Exception as error:
@@ -804,13 +851,14 @@ class StudyService:
 
     @synchronized
     def logout(self, provider):
+        self.require_request_account()
         if self.active_jobs:
             raise StudyError("TASK_RUNNING")
         if provider == "moodle":
             self.hub.disconnect_sis()
             Vault().operation("delete", probe.account_key("p0"))
-            self.user = None
             atomic_text(self.active_path, "{}")
+            self.activate_user(None)
         elif provider == "ntpu-ai":
             self.ai.rpc("logout")
         elif provider == "sis":

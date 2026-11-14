@@ -83,6 +83,22 @@
   margin-bottom: 0;
 }
 
+.task-row-with-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding-right: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.task-row-with-action:last-child,
+.task-row-with-action > .assignment-row {
+  border-bottom: 0;
+}
+.task-row-with-action > .assignment-row {
+  padding-right: 0;
+}
+
 @media (max-width: 600px) {
   .work-choice {
     grid-template-columns: minmax(0, 1fr);

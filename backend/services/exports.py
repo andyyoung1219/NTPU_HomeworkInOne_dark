@@ -21,6 +21,11 @@ from backend.agent.runner import filesystem_path
 from backend.models.store import now
 from backend.services.learning import fail
 from backend.services.reports import clean_inline
+from backend.services.submission import (
+    require_submission_content,
+    submission_export_stale,
+    submission_markdown,
+)
 
 
 def readable(text):
@@ -437,8 +442,12 @@ def export_extra(study, task_id, kind, include_sources=False):
             fail("REVIEW_REQUIRED")
         if task.get("plan") and not task.get("ready_for_export"):
             fail("INCOMPLETE_ACCEPTANCE_REQUIRED")
+        markdown = submission_markdown(task)
+        require_submission_content(task, markdown)
+        submission_hash = hashlib.sha256(markdown.encode()).hexdigest()
         omitted = {}
-        if kind == "zip" and not task.get("pdf"):
+        if kind == "zip" and (not task.get("pdf") or
+                              submission_export_stale(task, markdown, task.get("qa"), "pdf")):
             try:
                 task = study.export(task_id)
             except Exception as exc:
@@ -455,9 +464,9 @@ def export_extra(study, task_id, kind, include_sources=False):
         # Reuse a registered Word export when packing ZIP. Rewriting it before
         # all inputs pass validation could invalidate an earlier download if
         # ZIP creation subsequently fails.
-        if kind == "docx" or "docx" not in artifacts:
+        if kind == "docx" or "docx" not in artifacts or submission_export_stale(task, markdown, artifacts["docx"], "docx"):
             try:
-                qa = render_docx(task["draft"], docx_path, images=task_images(study, task))
+                qa = render_docx(markdown, docx_path, images=task_images(study, task))
             except Exception as exc:
                 code = error_code(exc)
                 if kind != "zip" or not code.startswith("DOCX_"):
@@ -465,7 +474,8 @@ def export_extra(study, task_id, kind, include_sources=False):
                 omitted["docx"] = code
                 artifacts.pop("docx", None)
             else:
-                artifacts["docx"] = {**qa, "path": str(docx_path.relative_to(study.root.resolve()))}
+                artifacts["docx"] = {**qa, "path": str(docx_path.relative_to(study.root.resolve())),
+                                     "submission_sha256": submission_hash}
         if kind == "zip":
             entries = {}
 
@@ -491,11 +501,11 @@ def export_extra(study, task_id, kind, include_sources=False):
                     fail("EXPORT_SIZE_LIMIT")
                 entries[name] = data
 
-            if task.get("pdf"):
+            if task.get("pdf") and "pdf" not in omitted:
                 add("report.pdf", study.safe_path(task["pdf"]), task["qa"]["sha256"])
             if "docx" in artifacts:
                 add("report.docx", study.safe_path(artifacts["docx"]["path"]), artifacts["docx"]["sha256"])
-            entries["report.md"] = task["draft"].encode("utf-8")
+            entries["report.md"] = markdown.encode("utf-8")
             for name, artifact in task.get("generated_files", {}).items():
                 if not re.fullmatch(r"[\w.-]+", name) or name in {".", ".."}:
                     fail("ARTIFACT_NAME_INVALID")
@@ -542,9 +552,17 @@ def export_extra(study, task_id, kind, include_sources=False):
                         "source_hashes": task.get("source_hashes", {}),
                         "unresolved": task.get("report_model", {}).get("unresolved", []),
                         "artifacts": {name: hashlib.sha256(data).hexdigest() for name, data in entries.items()}}
+            direct = task.get("request", {}).get("mode") == "complete_assignment"
+            if direct:
+                manifest.pop("unresolved")
             if task.get("plan", {}).get("deliverables"):
-                manifest["coverage"] = task["coverage"]
-                manifest["required_actions"] = task.get("completion", {}).get("required_actions", [])
+                if not direct or task.get("completion", {}).get("status") == "complete":
+                    manifest["coverage"] = task["coverage"]
+                if not direct:
+                    manifest["required_actions"] = task.get("completion", {}).get("required_actions", [])
+            if revision := task.get("revision"):
+                manifest["revision"] = {key: revision[key] for key in
+                                        ("parent_task_id", "unit_id", "mode", "affected_unit_ids")}
             entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
             zip_path = output / "workspace.zip"
             pending = output / "workspace.pending.zip"
@@ -560,6 +578,8 @@ def export_extra(study, task_id, kind, include_sources=False):
                 pending.unlink(missing_ok=True)
             artifacts["zip"] = {"path": str(zip_path.relative_to(study.root.resolve())),
                                 "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
+                                "submission_sha256": submission_hash,
+                                "separate_review_checklist": direct,
                                 "include_sources": bool(include_sources), "omitted_exports": omitted}
         task["exports"] = artifacts
         study.store.save(user, "task", task_id, task)

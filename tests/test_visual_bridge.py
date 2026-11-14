@@ -1,10 +1,14 @@
 """Bounded visual transport and real offline attachment scanner checks."""
 import base64
+import concurrent.futures
 import hashlib
 import io
 import json
 import shutil
 import subprocess
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
@@ -50,6 +54,98 @@ def node_decode(value, *, scan=False):
         capture_output=True, text=True, encoding='utf-8', timeout=65)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def test_stdio_preserves_long_unicode_with_and_without_visual_input(tmp_path, monkeypatch):
+    echo = tmp_path / 'echo-chat.cjs'
+    echo.write_text("""
+const { BrowserBridge } = require(process.cwd() + '/ntpu-ai-bridge/vendor/src/browser');
+BrowserBridge.prototype.chat = async (prompt, { attachment }) => ({
+  text: JSON.stringify([prompt, attachment?.buffer.length ?? 0]),
+});
+""", encoding='utf-8')
+    monkeypatch.setenv('NODE_OPTIONS', f'--require="{echo.as_posix()}"')
+
+    data = png()
+    adapter = AIAdapter()
+    try:
+        for prompt, attachment in (('中' * 17000, None), ('\x00' * 47997 + '😀\ud800', None),
+                                   ('中' * 48000, approved(data))):
+            _, result = adapter.begin(prompt, attachment=attachment, timeout_seconds=10)
+            assert json.loads(result.result(timeout=10)) == [prompt, len(data) if attachment else 0]
+        with pytest.raises(AIError, match='INVALID_REQUEST'):
+            adapter.begin('中' * 48001, timeout_seconds=10)
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize('phase', ['decode', 'before_upload'])
+def test_stdio_cancels_visual_request_before_upload(tmp_path, monkeypatch, phase):
+    pause = tmp_path / 'pause-chat.cjs'
+    pause.write_text("""
+const fs = require('node:fs');
+const root = process.cwd() + '/ntpu-ai-bridge';
+const { BrowserBridge } = require(root + '/vendor/src/browser');
+const sharp = require(root + '/node_modules/sharp');
+const waitForRelease = async () => {
+  fs.writeFileSync(process.env.TEST_BRIDGE_PAUSED, '');
+  while (!fs.existsSync(process.env.TEST_BRIDGE_RELEASE)) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+};
+const original = sharp.prototype.stats;
+sharp.prototype.stats = async function () {
+  if (process.env.TEST_BRIDGE_PHASE === 'decode') await waitForRelease();
+  return original.call(this);
+};
+BrowserBridge.prototype.chat = async (prompt, options) => {
+  if (options.attachment) {
+    if (process.env.TEST_BRIDGE_PHASE === 'before_upload') await waitForRelease();
+    options.onUpload?.('sources.png');
+    fs.writeFileSync(process.env.TEST_BRIDGE_UPLOADED, '');
+  }
+  return { text: prompt };
+};
+""", encoding='utf-8')
+    paused, release, uploaded = (tmp_path / name for name in ('paused', 'release', 'uploaded'))
+    monkeypatch.setenv('NODE_OPTIONS', f'--require="{pause.as_posix()}"')
+    monkeypatch.setenv('TEST_BRIDGE_PHASE', phase)
+    monkeypatch.setenv('TEST_BRIDGE_PAUSED', str(paused))
+    monkeypatch.setenv('TEST_BRIDGE_RELEASE', str(release))
+    monkeypatch.setenv('TEST_BRIDGE_UPLOADED', str(uploaded))
+
+    adapter = AIAdapter()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        begin = pool.submit(adapter.begin, 'Approved visual', attachment=approved(png()),
+                            task_id='cancel-visual', timeout_seconds=10)
+        try:
+            deadline = time.monotonic() + 8
+            while not paused.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert paused.exists(), 'The bridge did not reach the expected pause'
+            assert adapter.rpc('cancel_task', task_id='cancel-visual', timeout_seconds=3)['requested']
+            release.touch()
+            with pytest.raises(AIError, match='CANCELLED'):
+                _, result = begin.result(timeout=5)
+                result.result(timeout=5)
+            assert not uploaded.exists()
+            _, result = adapter.begin('Next task', timeout_seconds=5)
+            assert result.result(timeout=5) == 'Next task'
+        finally:
+            release.touch()
+            adapter.close()
+
+
+def test_cancel_before_pipe_write_does_not_start_chat(monkeypatch):
+    cancel = threading.Event()
+    cancel.set()
+    adapter = AIAdapter()
+    adapter.process = SimpleNamespace(stdin=io.StringIO())
+    monkeypatch.setattr(adapter, 'start', lambda: None)
+    with pytest.raises(AIError, match='CANCELLED'):
+        adapter.begin('Approved prompt', task_id='pre-cancelled', cancel=cancel, timeout_seconds=5)
+    assert not adapter.jobs and not adapter.requests
+    assert not adapter.process.stdin.getvalue()
 
 
 def test_begin_binds_visual_bytes_to_approved_hash_without_paths(monkeypatch):

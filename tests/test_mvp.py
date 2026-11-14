@@ -135,7 +135,8 @@ def test_cjk_pdf_requires_review_and_survives_restart(service):
     assert validate_pdf(path)["passed"]
     with pymupdf.open(path) as pdf:
         text = "".join(page.get_text() for page in pdf)
-        assert "繁體中文測試報告" in text and "待補" in text and "第 1 頁" in text
+        assert "繁體中文測試報告" in text and "第 1 頁" in text
+        assert "待補與人工核對" not in text
     reopened = StudyService(service.root, FakeAI())
     assert reopened.get("task", task["id"])["draft"] == task["draft"]
     reopened.close()

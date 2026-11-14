@@ -42,6 +42,34 @@ test('editing a reviewed draft revokes export approval and hides stale downloads
   await assert.rejects(flow.action('work-export',{dataset:{kind:'pdf'}}),/先確認審閱/);
   await flow.flush(); flow.reset();
 });
+test('review hides outdated exports and restores each download after it is regenerated',async () => {
+  const exported = {...draftTask,status:'completed',reviewed:true,pdf:'report.pdf',
+    exports:{...draftTask.exports,zip:{path:'workspace.zip'}}};
+  const {flow} = harness(null,{
+    '/tasks/t1': () => ({...exported,stale_exports:['pdf','docx','zip']}),
+    '/tasks/t1/export': () => ({...exported,stale_exports:['docx','zip']}),
+    '/tasks/t1/export-extra': () => ({...exported,stale_exports:[]}),
+  });
+  await flow.openTask('t1');
+  let html = flow.html();
+  assert.match(html,/請確認審閱後重新匯出/);
+  assert.match(html,/kind=markdown"/);
+  assert.doesNotMatch(html,/kind=(pdf|manifest|docx|zip)"/);
+
+  await flow.change({id:'work-reviewed',checked:true,dataset:{}});
+  await flow.action('work-export',{dataset:{kind:'pdf'}});
+  html = flow.html();
+  assert.match(html,/kind=pdf"/);
+  assert.match(html,/kind=manifest"/);
+  assert.doesNotMatch(html,/kind=(docx|zip)"/);
+
+  await flow.action('work-export',{dataset:{kind:'zip'}});
+  html = flow.html();
+  assert.match(html,/kind=docx"/);
+  assert.match(html,/kind=zip"/);
+  assert.doesNotMatch(html,/請確認審閱後重新匯出/);
+  flow.reset();
+});
 test('a lost create response retries the same idempotency key and preserves prior work',async () => {
   let attempts = 0;
   const {flow,calls} = harness({course_id:'c1',assignment_id:'a1',task_id:'t1',page:'configure',excerpt:'source',editor:'# Kept draft'}, {
@@ -125,7 +153,7 @@ test('review shows deliverable status and specific user actions', async () => {
   });
   await flow.openTask('t1');
   const html = flow.html();
-  assert.match(html,/Run the experiment · 已核對執行與輸出/);
+  assert.match(html,/Run the experiment · 已執行，數值與解法待核對/);
   assert.match(html,/Interactive &lt;chart&gt; · 需處理待辦/);
   assert.match(html,/<strong>Interactive &lt;chart&gt;<\/strong><ul><li>Use a browser with &lt;script&gt; support\./);
   assert.equal((html.match(/Use a browser/g) || []).length,1);
@@ -134,6 +162,114 @@ test('review shows deliverable status and specific user actions', async () => {
   await flow.change({id:'work-reviewed',checked:true,dataset:{}});
   await flow.action('work-export',{dataset:{kind:'pdf'}});
   assert.equal(calls.find(call => call.path.endsWith('/draft')).body.accept_incomplete,true);
+  flow.reset();
+});
+
+test('review distinguishes an unconfirmed missing stage from an optional or required action', async () => {
+  const message = 'Interactive slider — Check the original assignment.';
+  const partial = {...draftTask,blockers:[message],coverage:[
+    {deliverable_id:'slider',title:'Interactive slider',status:'needs_review',requirement_status:'unconfirmed'},
+  ],completion:{status:'needs_action',required_actions:[],review_required:[message]}};
+  const {flow,calls} = harness(null,{'/tasks/t1': () => partial});
+  await flow.openTask('t1');
+  const html = flow.html();
+  assert.match(html,/Interactive slider · 未完成，待確認是否必交/);
+  assert.match(html,/交付要求待確認/);
+  assert.doesNotMatch(html,/需處理待辦/);
+  assert.equal((html.match(/Check the original assignment\./g) || []).length,1);
+  await flow.change({id:'work-reviewed',checked:true,dataset:{}});
+  await flow.action('work-export',{dataset:{kind:'pdf'}});
+  assert.equal(calls.find(call => call.path.endsWith('/draft')).body.accept_incomplete,true);
+  flow.reset();
+});
+
+test('review submits selected manual results as an idempotent partial rerun', async () => {
+  const source = {...draftTask,request:{mode:'complete_assignment'},plan:{deliverables:[
+    {id:'measure',title:'Measure',kind:'python',expected_artifacts:['measure.json']},
+    {id:'analyze',title:'Analyze',kind:'writing',dependencies:['measure']},
+    {id:'other',title:'Independent',kind:'writing'},
+  ]},coverage:[
+    {deliverable_id:'measure',title:'Measure',status:'needs_action',reasons:['Run it.'],action:'Measure (REQ-01) — Run it.'},
+    {deliverable_id:'analyze',title:'Analyze',status:'needs_action',action_deferred:true,reasons:['Wait for Measure.']},
+    {deliverable_id:'other',title:'Independent',status:'needs_action',optional:true,reasons:['Explore.']},
+  ],completion:{required_actions:['Measure (REQ-01) — Run it.']}};
+  let attempts = 0;
+  const confirmation = [];
+  const {flow,nodes,calls} = harness(null,{
+    '/tasks/t1': () => source,
+    '/tasks/t1/revise': () => {
+      if (++attempts === 1) throw new Error('connection lost');
+      return {...source,id:'t2',draft:'# Updated report',revision:{parent_task_id:'t1'},coverage:[]};
+    },
+  },async (...args) => { confirmation.push(args); return true; });
+  await flow.openTask('t1');
+  assert.match(flow.html(),/只補跑受影響的階段/);
+  assert.match(flow.html(),/Independent · 選做/);
+  assert.match(flow.html(),/Analyze · 等待前置成果/);
+  assert.doesNotMatch(flow.html(),/Wait for Measure/);
+  assert.equal((flow.html().match(/Run it\./g) || []).length,1);
+  nodes.set('#work-revision-unit',{value:'measure'});
+  nodes.set('#work-revision-mode',{value:'result'});
+  nodes.set('#work-revision-notes',{value:'Measured locally.'});
+  nodes.set('#work-revision-files',{files:[{
+    name:'measure.json',size:7,arrayBuffer:async () => new TextEncoder().encode('{"n":1}').buffer,
+  }]});
+  await flow.change({id:'work-revision-mode',dataset:{}});
+  assert.match(nodes.get('#work-revision-scope').textContent,/Measure、Analyze與報告將更新/);
+  await assert.rejects(flow.action('work-revise',{}),/connection lost/);
+  await flow.action('work-revise',{});
+  const requests = calls.filter(call => call.path.endsWith('/revise'));
+  assert.equal(requests[0].headers['Idempotency-Key'],requests[1].headers['Idempotency-Key']);
+  assert.deepEqual(requests[1].body,{
+    unit_id:'measure',mode:'result',notes:'Measured locally.',
+    files:[{name:'measure.json',data:'eyJuIjoxfQ=='}],approved:true,
+  });
+  assert.doesNotMatch(confirmation[0][1],/Independent/);
+  assert.match(flow.html(),/# Updated report/);
+  await flow.action('work-revision-parent',{});
+  assert.match(flow.html(),/# Saved draft/);
+  flow.reset();
+});
+
+test('a partial rerun that finished while away restores its new draft', async () => {
+  const {flow} = harness({course_id:'c1',assignment_id:'a1',task_id:'t1',page:'generate',editor:''},{
+    '/tasks/t1': () => ({...draftTask,request:{mode:'complete_assignment'},revision:{parent_task_id:'previous',draft_edits_conflicted:true}}),
+  });
+  await flow.load();
+  assert.match(flow.html(),/# Saved draft/);
+  assert.match(flow.html(),/查看補跑前的成果/);
+  assert.match(flow.html(),/部分人工修改與重跑內容重疊。可開啟補跑前的成果核對。/);
+  assert.match(flow.html(),/草稿已保存/);
+  flow.reset();
+});
+
+test('incomplete direct work offers a stage retry with existing inputs', async () => {
+  const incomplete = {...draftTask,request:{mode:'complete_assignment'},plan:{deliverables:[
+    {id:'write',title:'Write the report',kind:'writing'},
+    {id:'submit',title:'Submit to Moodle',kind:'manual'},
+  ]},coverage:[
+    {deliverable_id:'write',title:'Write the report',status:'needs_action',reasons:['Writer failed.']},
+    {deliverable_id:'submit',title:'Submit to Moodle',status:'needs_action',reasons:['Upload it.']},
+  ],tool_results:{'unit-data':{status:'verified',artifacts:{
+    'data__analysis.csv':{filename:'analysis.csv'},
+    'data__run.json':{filename:'run.json'},
+  }}}};
+  const {flow,calls} = harness(null,{
+    '/tasks/t1': () => incomplete,
+    '/tasks/t1/revise': () => ({...incomplete,id:'t2',draft:'# Completed report',coverage:[]}),
+  });
+  await flow.openTask('t1');
+  assert.match(flow.html(),/data-action="work-retry-stage"[^>]*data-unit="write"/);
+  assert.match(flow.html(),/匯出部分成果 PDF/);
+  assert.match(flow.html(),/下載 部分成果 Markdown/);
+  assert.match(flow.html(),/\/api\/tasks\/t1\/artifacts\/data__analysis\.csv/);
+  assert.doesNotMatch(flow.html(),/data__run\.json/);
+  await flow.action('work-retry-stage',{dataset:{unit:'write'}});
+  assert.deepEqual(calls.find(call => call.path.endsWith('/revise')).body,{
+    unit_id:'write',mode:'retry',notes:'',files:[],approved:true,
+  });
+  assert.match(flow.html(),/# Completed report/);
+  assert.doesNotMatch(flow.html(),/匯出部分成果/);
   flow.reset();
 });
 test('parsed requirements preserve human-readable source identifiers',async () => {

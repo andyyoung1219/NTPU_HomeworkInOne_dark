@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | https://github.com/xujk0217/NTPUOne | 執行原始 Moodle 唯讀探針與測試；以 Windows Vault 包裝原探針；P2 移植 SIS 登入／橋接、AcademicReportParser v4、課表／課程對應原則 | 保留所有權利；提出者確認作者允許使用，見 `docs/AUTHORIZATION.md` |
 | https://github.com/xujk0217/ntpu-ai-vscode | 原始 BrowserBridge、安全檢查及其測試；獨立 Node 子程序包裝 | MIT，原文保存在 `LICENSES/ntpu-ai-vscode.txt` 及 vendor/LICENSE |
+| https://github.com/moby/profiles | Docker 工作台使用的 Chromium seccomp 設定，以固定版本的 Moby 預設設定為基礎 | Apache-2.0，授權見 `LICENSES/moby-profiles.txt`；來源與修改範圍見 `deploy/README.md` |
 
 兩個來源 checkout 放在忽略追蹤的 `.upstream/`。
 P1 只將 BrowserBridge 必要的 8 個原始 JS 模組逐位元複製到 `ntpu-ai-bridge/vendor/`，

@@ -10,6 +10,7 @@ from test_sis import transport
 
 from backend.integrations.materials import fetch_material, inspect_material
 from backend.p0.moodle import probe
+from backend.services.study import StudyError
 
 
 def archive(name, data=b"<xml/>"):
@@ -90,6 +91,24 @@ def test_compressed_http_responses_are_decoded_once():
     reader = transport(lambda request: httpx.Response(200, content=gzip.compress(b"decoded body"), headers={"content-encoding": "gzip"}))
     assert reader.request("GET", "https://my.ntpu.edu.tw/").content == b"decoded body"
     reader.close()
+
+
+def test_download_accepts_verified_local_attachment_without_remote_metadata(service, monkeypatch):
+    ref = "a" * 24
+    asset = service.get("asset", ref)
+    monkeypatch.setattr(service, "verify_identity", lambda: None)
+
+    def unexpected_download(_):
+        pytest.fail("Local-only attachments must not be downloaded from Moodle")
+
+    monkeypatch.setattr(service.moodle, "download", unexpected_download)
+    result = service.download("2", [ref])
+    assert "Please submit a report" in result["excerpt"]
+    assert result["assets"][0]["sha256"] == asset["sha256"]
+
+    service.safe_path(asset["path"]).write_bytes(b"changed")
+    with pytest.raises(StudyError, match="ASSET_CHANGED"):
+        service.download("2", [ref])
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "big5"])

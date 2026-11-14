@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 CHECKER = Path(__file__).resolve().parents[1] / "scripts" / "check_repository.py"
+IGNORE = CHECKER.parent.parent / ".gitignore"
 
 
 def git(repo, *args):
@@ -70,3 +71,29 @@ def test_pre_push_checks_a_secret_added_and_deleted_within_the_push(audit_repo):
     assert result.returncode == 1
     assert "'sample.html': GitHub token" in result.stderr
     assert sample not in result.stderr
+
+
+def test_desktop_code_and_volume_backups_are_ignored_and_rejected_if_forced(audit_repo):
+    shutil.copyfile(IGNORE, audit_repo / ".gitignore")
+    artifacts = [
+        "login-desktop-password", "nested/Login-Desktop-Password",
+        "nested/volume-backup.TAR", "nested/volume-backup.TGZ", "nested/volume-backup.TAR.GZ",
+    ]
+    (audit_repo / "nested").mkdir()
+    for name in artifacts:
+        (audit_repo / name).write_bytes(b"synthetic runtime file")
+    (audit_repo / "nested" / "backup.py").write_text("# Synthetic backup utility.\n", encoding="utf-8")
+
+    assert git(audit_repo, "check-ignore", "--", *artifacts).splitlines() == artifacts
+    assert "nested/backup.py" in git(audit_repo, "ls-files", "--others", "--exclude-standard").splitlines()
+    assert scan(audit_repo).returncode == 0
+
+    base = git(audit_repo, "rev-parse", "HEAD")
+    git(audit_repo, "add", "-f", "--", *artifacts)
+    git(audit_repo, "commit", "-qm", "add synthetic private artifacts")
+    tip = git(audit_repo, "rev-parse", "HEAD")
+    result = scan(audit_repo, "--pre-push",
+                  updates=f"refs/heads/main {tip} refs/heads/main {base}\n")
+    assert result.returncode == 1
+    assert all(f"{name!r}: private file or runtime artifact" in result.stderr for name in artifacts)
+    assert "synthetic runtime file" not in result.stderr

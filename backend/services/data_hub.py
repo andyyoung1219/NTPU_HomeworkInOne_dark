@@ -70,8 +70,8 @@ class DataHub:
     def store(self):
         return self.study.store
 
-    def snapshot(self, identifier):
-        saved = self.store.get(self.user, "hub", identifier)
+    def snapshot(self, identifier, *, user=None):
+        saved = self.store.get(user or self.user, "hub", identifier)
         if saved is None:
             return {"id": identifier, "data": None, "status": "not_synced", "stale": True,
                     "last_synced_at": None, "error": None}
@@ -392,12 +392,14 @@ class DataHub:
             self.store.save(self.user, "material", ref, asset)
             return asset
 
-    def mappings(self):
-        timetable = self.snapshot("sis:timetable").get("data") or {}
-        courses = self.store.list(self.user, "course")
+    def mappings(self, *, user=None, timetable=None):
+        user = user or self.user
+        if timetable is None:
+            timetable = self.snapshot("sis:timetable", user=user).get("data") or {}
+        courses = self.store.list(user, "course")
         output = []
         for sis in timetable.get("courses", []):
-            saved = self.store.get(self.user, "course_mapping", sis["id"])
+            saved = self.store.get(user, "course_mapping", sis["id"])
             candidates = [c for c in courses if c.get("semester") in {None, sis["semester"]}
                           and (c.get("code") == sis["code"] or normalized_name(c["name"]) == normalized_name(sis["name"]))]
             exact = [c for c in candidates if c.get("semester") == sis["semester"] and c.get("code") == sis["code"]
@@ -421,11 +423,16 @@ class DataHub:
             return value
 
     def overview(self):
-        return {"sis_connection": self.sis.state if self.sis_user == self.user else "login_required",
-                "sis": {kind: self.snapshot("sis:" + kind) for kind in ("timetable", "grades", "rank", "graduation")},
-                "preferences": self.store.get(self.user, "preferences", "hub") or {"course_ids": []},
-                "mappings": self.mappings()}
+        user = self.user
+        connection = self.sis.state if self.sis_user == user else "login_required"
+        snapshots = {kind: self.snapshot("sis:" + kind, user=user)
+                     for kind in ("timetable", "grades", "rank", "graduation")}
+        return {"sis_connection": connection, "sis": snapshots,
+                "preferences": self.store.get(user, "preferences", "hub") or {"course_ids": []},
+                "mappings": self.mappings(user=user, timetable=snapshots["timetable"].get("data") or {})}
 
     def course(self, course_id):
-        self.study.get("course", course_id)
-        return {kind: self.snapshot(f"moodle:{course_id}:{kind}") for kind in ("assignments", "contents", "announcements", "grades")}
+        user = self.user
+        self.study.get("course", course_id, user)
+        return {kind: self.snapshot(f"moodle:{course_id}:{kind}", user=user)
+                for kind in ("assignments", "contents", "announcements", "grades")}

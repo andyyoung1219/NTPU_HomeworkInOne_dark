@@ -7,9 +7,14 @@ already downloaded files; it never downloads or sends anything to a model.
 import hashlib
 import json
 import re
+from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from hmac import digest
 from pathlib import Path
+from secrets import token_bytes
+from threading import Lock
 
 from keyring.errors import KeyringError
 
@@ -81,9 +86,49 @@ def submission_refresh_error(error):
     return "SUBMISSION_STATUS_UNAVAILABLE"
 
 
+class SubmissionRefreshBatch:
+    """Share each observation across views whose live refreshes overlap."""
+
+    def __init__(self, moodle, user):
+        self.moodle = moodle
+        self.user = user
+        self.views = 0
+        self.lock = Lock()
+        self.requests = {}
+
+    def once(self, key, request):
+        with self.lock:
+            existing = self.requests.get(key)
+            if existing is None:
+                result = self.requests[key] = Future()
+        if existing is not None:
+            return existing.result()
+        try:
+            result.set_result(request())
+        except BaseException as error:
+            result.set_exception(error)
+        return result.result()
+
+    def credentials(self):
+        return self.once(None, lambda: self.moodle.credentials(expected_user=self.user))
+
+    def assignment(self, token, assignment_id):
+        def request():
+            _, payload = self.moodle.client.call("mod_assign_get_submission_status", token, {
+                "assignid": assignment_id,
+            })
+            observation = probe.submission_observation(payload)
+            return observation["individual_state"], payload["lastattempt"].get("teamsubmission") is not None
+
+        return self.once(assignment_id, request)
+
+
 class LearningCenter:
     def __init__(self, study):
         self.study = study
+        self.submission_lock = Lock()
+        self.submission_batches = {}
+        self.submission_scope_key = token_bytes(32)
         with study.store.connection() as db:
             db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS learning_search USING fts5(
                 user_id UNINDEXED, course_id UNINDEXED, kind UNINDEXED, ref UNINDEXED,
@@ -105,14 +150,24 @@ class LearningCenter:
                            "due_label": due_label(item.get("due_at"))})
         return sorted(result, key=lambda a: (a.get("due_at") or float("inf"), a["title"]))
 
-    def refresh_submissions(self, user, items, timestamp):
-        """Project Moodle's live response without changing the saved assignment data."""
-        for item in items:
-            item.update(submission_status="unknown", submission_label="待確認")
-        if not items:
-            return None
+    @contextmanager
+    def _submission_batch(self, user):
+        with self.submission_lock:
+            batch = self.submission_batches.get(user)
+            if batch is None:
+                batch = self.submission_batches[user] = SubmissionRefreshBatch(self.study.moodle, user)
+            batch.views += 1
         try:
-            token, functions = self.study.moodle.credentials(expected_user=user)
+            yield batch
+        finally:
+            with self.submission_lock:
+                batch.views -= 1
+                if not batch.views:
+                    del self.submission_batches[user]
+
+    def _refresh_batch(self, batch, items, timestamp):
+        try:
+            token, functions = batch.credentials()
         except probe.ProbeError as error:
             return submission_refresh_error(error)
         except (KeyringError, ValueError, OSError):
@@ -121,20 +176,16 @@ class LearningCenter:
             return "MOODLE_PERMISSION_DENIED"
         failure = None
         for item in items:
-            if self.study.user != user:
+            if self.study.user != batch.user:
                 fail("ACCOUNT_CHANGED_RECONNECT")
             assignment_id = str(item["id"])
             if not re.fullmatch(r"[1-9][0-9]*", assignment_id):
                 failure = "SUBMISSION_STATUS_UNAVAILABLE"
                 continue
             try:
-                _, payload = self.study.moodle.client.call("mod_assign_get_submission_status", token, {
-                    "assignid": int(assignment_id),
-                })
-                observation = probe.submission_observation(payload)
-                if item.get("team_submission") or payload["lastattempt"].get("teamsubmission") is not None:
+                state, team_submission = batch.assignment(token, int(assignment_id))
+                if item.get("team_submission") or team_submission:
                     continue  # Group submission does not establish individual status.
-                state = observation["individual_state"]
                 item.update(submission_status=state,
                             submission_label=submission_label({"submission_status": state,
                                                                "due_at": item.get("due_at")}, timestamp))
@@ -146,6 +197,15 @@ class LearningCenter:
                 failure = failure or code
         return failure
 
+    def refresh_submissions(self, user, items, timestamp):
+        """Project Moodle's live response without changing the saved assignment data."""
+        for item in items:
+            item.update(submission_status="unknown", submission_label="待確認")
+        if items:
+            with self._submission_batch(user) as batch:
+                return self._refresh_batch(batch, items, timestamp)
+        return None
+
     def _refresh_for_view(self, user, items, timestamp):
         # Moodle requests can take time. Keep the app lock free for other work,
         # but discard the view if its account changed before we could return it.
@@ -155,18 +215,30 @@ class LearningCenter:
                 fail("ACCOUNT_CHANGED_RECONNECT")
         return error
 
-    def dashboard(self, live=False):
+    def _submission_view(self, user, items, timestamp, live, pending):
+        if not (live or pending):
+            return {}
+        # A local page and its live response can straddle a login in another tab.
+        scope = digest(self.submission_scope_key, user.encode(), "sha256").hex()
+        if live:
+            return {"submission_scope": scope,
+                    "submission_refresh_error": self._refresh_for_view(user, items, timestamp)}
+        for item in items:
+            item.update(submission_status="unknown", submission_label="更新中")
+        return {"submission_scope": scope, "submission_refresh_pending": bool(items)}
+
+    def dashboard(self, live=False, pending=False):
         with self.study.lock:
             user = self.study.require_user()
             courses = self.records("course")
-            active = (latest_course_ids(courses) if live else
+            active = (latest_course_ids(courses) if live or pending else
                       {c["id"] for c in courses if c.get("scope") != "inactive"})
             items = [a for a in self.assignments() if a["course_id"] in active]
             tasks = self.records("task")
             timetable = self.study.hub.snapshot("sis:timetable")
         current = datetime.now(TAIPEI)
         timestamp = current.timestamp()
-        refresh = {"submission_refresh_error": self._refresh_for_view(user, items, timestamp)} if live else {}
+        refresh = self._submission_view(user, items, timestamp, live, pending)
         today = []
         for course in (timetable.get("data") or {}).get("courses", []):
             for meeting in course.get("meetings", []):
@@ -182,7 +254,7 @@ class LearningCenter:
                 "review": [t for t in tasks if t.get("draft") and t["status"] != "completed"],
                 "recent": tasks[:12]}
 
-    def course(self, course_id, live=False):
+    def course(self, course_id, live=False, pending=False):
         with self.study.lock:
             user = self.study.require_user()
             course = self.study.get("course", course_id)
@@ -193,9 +265,7 @@ class LearningCenter:
                     "tasks": [t for t in self.records("task") if t["assignment_id"] in ids],
                     "materials": self.materials(course_id),
                     "assets": [a for a in self.records("asset") if a["assignment_id"] in ids]}
-        if live:
-            view["submission_refresh_error"] = self._refresh_for_view(
-                user, assignments, datetime.now(TAIPEI).timestamp())
+        view.update(self._submission_view(user, assignments, datetime.now(TAIPEI).timestamp(), live, pending))
         return view
 
     def materials(self, course_id):
@@ -362,15 +432,16 @@ class LearningCenter:
 
     @locked
     def progress(self):
-        value = self.study.store.get(self.study.require_user(), "preferences", "workflow")
+        user = self.study.require_user()
+        value = self.study.store.get(user, "preferences", "workflow")
         if not value:
             return None
         value = dict(value)
-        assignment = self.study.store.get(self.study.user, "assignment", value.get("assignment_id"))
+        assignment = self.study.store.get(user, "assignment", value.get("assignment_id"))
         if not assignment or assignment.get("removed") or assignment["course_id"] != value.get("course_id"):
             return None
         value["selected_asset_ids"] = [ref for ref in value["selected_asset_ids"] if ref in assignment["asset_ids"]]
-        task = self.study.store.get(self.study.user, "task", value.get("task_id"))
+        task = self.study.store.get(user, "task", value.get("task_id"))
         if task and task["assignment_id"] == assignment["id"]:
             if not value.get("editor"):
                 value["editor"] = task.get("draft", "")

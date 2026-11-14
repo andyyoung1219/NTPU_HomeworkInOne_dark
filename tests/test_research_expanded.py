@@ -249,7 +249,7 @@ def test_direct_completion_withholds_unapproved_lookups_but_keeps_report(
     assert result['status'] == 'waiting_review', result.get('error')
     assert result['completion']['status'] == 'needs_action'
     assert expected_action in result['completion']['required_actions']
-    assert expected_action in result['draft']
+    assert expected_action not in result['draft']
     assert 'research_query' not in result['completion_plan']
     assert result['completion_data']['research'] == {}
     assert result['completion_data']['datasets'] == []

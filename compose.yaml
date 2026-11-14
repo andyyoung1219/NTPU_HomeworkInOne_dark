@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    image: ntpu-homework-in-one:${NTPU_APP_VERSION:-local}
+    init: true
+    stop_grace_period: 20s
+    depends_on:
+      runner-image:
+        condition: service_completed_successfully
+    shm_size: 256mb
+    security_opt:
+      - seccomp=./deploy/chromium-seccomp.json
+    ports:
+      - "127.0.0.1:8766:8766"
+      - "127.0.0.1:6080:6080"
+    environment:
+      NTPU_APP_DATA_DIR: /data
+      NTPU_BIND_HOST: 0.0.0.0
+      NTPU_EPHEMERAL_VAULT: "1"
+      NTPU_RUNNER_DATA_VOLUME: ${NTPU_DATA_VOLUME:-ntpu-homework-data}
+      NTPU_RUNNER_IMAGE_TAG: ntpu-p3-runner:${NTPU_APP_VERSION:-compose}
+    volumes:
+      - app-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  runner-image:
+    build: ./runner
+    image: ntpu-p3-runner:${NTPU_APP_VERSION:-compose}
+    entrypoint: ["python", "--version"]
+    read_only: true
+    network_mode: none
+
+volumes:
+  app-data:
+    name: ${NTPU_DATA_VOLUME:-ntpu-homework-data}

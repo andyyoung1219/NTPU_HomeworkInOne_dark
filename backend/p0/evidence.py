@@ -1,12 +1,14 @@
 """Allowlisted, content-free integration evidence. Never log exception messages."""
 
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-LOCAL = ROOT / ".local" / "p0"
+APP_DATA_DIR = os.environ.get("NTPU_APP_DATA_DIR")
+LOCAL = Path(APP_DATA_DIR) / "evidence" if APP_DATA_DIR else ROOT / ".local" / "p0"
 _lock = threading.Lock()
 FIELDS = {
     "passed", "code", "http_status", "course_count", "assignment_count", "asset_count",

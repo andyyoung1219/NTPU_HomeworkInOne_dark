@@ -2,6 +2,7 @@
 
 import hashlib
 import html
+import io
 import re
 import threading
 from pathlib import Path
@@ -119,7 +120,8 @@ def _render_pdf(markdown, output, images):
         picture = re.fullmatch(r"!\[([^\]]*)\]\(([^)]+)\)", line)
         if not in_code and picture and picture[2] in images:
             # Only caller-verified artifacts; Markdown cannot request local/remote reads.
-            chart = Image(str(images[picture[2]]))
+            asset = images[picture[2]]
+            chart = Image(io.BytesIO(asset) if isinstance(asset, bytes) else str(asset))
             chart.drawHeight *= min(1, (A4[0] - 100) / chart.drawWidth, 300 / chart.drawHeight)
             chart.drawWidth = chart.drawHeight * chart.imageWidth / chart.imageHeight
             story.extend([chart, Paragraph(clean_inline(picture[1]), cell_style), Spacer(1, 12)])
@@ -191,7 +193,6 @@ def _render_pdf(markdown, output, images):
         canvas.saveState()
         canvas.setFont("NotoTC", 8)
         canvas.setFillColor(colors.HexColor("#60736c"))
-        canvas.drawString(SIDE_MARGIN, 28, "AI 協作草稿 · 經使用者審閱匯出")
         canvas.drawRightString(doc.pageTemplate.pagesize[0] - SIDE_MARGIN, 28, f"第 {doc.page} 頁")
         canvas.restoreState()
 

@@ -168,17 +168,95 @@ def parse(data, suffix, mime, file_id):
     return chunks, flags
 
 
+OPTIONAL_REQUIREMENT = re.compile(
+    r"^[（(\[]?\s*(?:選做|選作|非必[做交繳]|非必要|加分[題項]?|延伸練習|可自行選做|如有餘力|建議(?:另|額外|加做)|"
+    r"optionally\b|optional\b|bonus\b|extra credit\b|not required\b)"
+    r"|[（(\[]\s*(?:選做|選作|非必[做交繳]|非必要|加分[題項]?|optional|bonus|extra credit|not required)\s*[）)\]]",
+    re.I,
+)
+REQUIREMENT_LIST_PREFIX = re.compile(r"^(?:[\s#>*+\-]|\d+(?:[.)](?=\s)|[、．])\s*)+")
+REQUIREMENT_CLAUSE = re.compile(r"[。；;]|(?<=[.!?])\s+")
+REQUIREMENT_HEADING = re.compile(
+    r"^[\s#>*+\-]*(?P<label>選做|選作|加分[題項]?|必做|必交|必繳|評分標準|評分項目|配分|"
+    r"optional|bonus|extra credit|required|rubric|grading criteria|grading breakdown|deliverables)"
+    r"(?:\s*(?:項目|要求|交付|tasks?|items?|deliverables?|requirements?))?\s*[:：]?\s*$",
+    re.I,
+)
+REQUIREMENT_LIST_ITEM = re.compile(r"^\s*(?:[-*+•]\s+|\d+[.)、．]\s*)\S")
+GRADED_REQUIREMENT = re.compile(
+    r"\d+(?:[.,]\d+)?\s*%\s*of\s+(?:the\s+)?grade\b|"
+    r"(?:[佔占]\s*(?:總成績|成績|總分)|配分\s*[:：]?)\s*\d+(?:[.,]\d+)?\s*(?:[%％]|分)|"
+    r"[（(\[]\s*\d+(?:[.,]\d+)?\s*(?:points?|pts?|分)\s*[）)\]]",
+    re.I,
+)
+RUBRIC_TABLE_ROW = re.compile(
+    r"^\s*\|?\s*[^|]+\|\s*\d+(?:[.,]\d+)?\s*(?:[%％分]|points?|pts?)\s*\|?\s*$", re.I,
+)
+REQUIREMENT_VERBS = (
+    r"compare|explain|calculate|implement|include|demonstrate|complete|provide|deliver|"
+    r"make|write|use|introduce|define|describe|identify|select|choose|construct|design"
+)
+REQUIREMENT_TEXT = re.compile(
+    r"請|須|需|繳|提交|報告|比較|實作|分析|\b(?:must|submit|require[ds]?)\b|"
+    rf"(?:^|(?<=[.!?])\s+)(?:please\s+)?(?:{REQUIREMENT_VERBS})\b",
+    re.I,
+)
+REQUIREMENT_NOTE = re.compile(r"^(?:NOTE|備註)\s*[:：]\s*", re.I)
+NOTE_DIRECTIVE = re.compile(
+    rf"^(?:(?:please\s+)?(?:{REQUIREMENT_VERBS}|submit|upload|attach|list|show|report|record|"
+    r"verify|cite|analy[sz]e|hand in|turn in)\s+\S|"
+    r"(?:you|students)\s+(?:must|(?:are|will be) required to)\s+\S|"
+    r"請\s*(?!(?:注意|留意))\S|(?:必[須需]|須|需(?!求)|務必|不得|繳交|提交|上傳|附上)\s*\S)",
+    re.I,
+)
+
+
+def optional_requirement(requirement):
+    first = REQUIREMENT_CLAUSE.split(REQUIREMENT_LIST_PREFIX.sub("", requirement["text"]), maxsplit=1)[0]
+    return requirement.get("optional", False) or bool(OPTIONAL_REQUIREMENT.search(first))
+
+
+def note_requirements(text):
+    for clause in REQUIREMENT_CLAUSE.split(text):
+        clause = clause.strip()
+        optional = optional_requirement({"text": clause})
+        if (optional and not REQUIREMENT_HEADING.fullmatch(clause)
+                or NOTE_DIRECTIVE.match(REQUIREMENT_LIST_PREFIX.sub("", clause))):
+            yield clause, optional
+
+
 def requirements(chunks):
     result = []
     for chunk in chunks:
+        section = None
         for line in chunk["text"].splitlines():
             line = line.strip()
-            if len(line) >= 8 and re.search(r"請|須|需|繳|提交|報告|比較|實作|分析|must|submit|require", line, re.I):
-                result.append({"id": f"REQ-{len(result) + 1:02}", "text": line[:500],
-                               "source": {key: chunk[key] for key in ("file_id", "page", "section") if key in chunk},
-                               "status": "needs_review"})
-            if len(result) >= 30:
-                return result
+            if heading := REQUIREMENT_HEADING.fullmatch(line):
+                section = "optional" if optional_requirement({"text": heading["label"]}) else "required"
+                continue
+            if line.startswith("#") or (line.endswith((":", "：")) and not REQUIREMENT_LIST_ITEM.match(line)):
+                section = None
+            optional_line = optional_requirement({"text": line})
+            listed = bool(REQUIREMENT_LIST_ITEM.match(line))
+            candidate = REQUIREMENT_LIST_PREFIX.sub("", line)
+            if re.match(r"^(?:PS|P\.S\.)\s*[:：]", candidate, re.I):
+                continue
+            if note := REQUIREMENT_NOTE.match(candidate):
+                matches = note_requirements(candidate[note.end():])
+            elif len(line) >= 8 and (optional_line or REQUIREMENT_TEXT.search(candidate) or
+                                     (listed and section) or GRADED_REQUIREMENT.search(candidate) or RUBRIC_TABLE_ROW.match(candidate)):
+                matches = [(line, optional_line)]
+            else:
+                continue
+            for text, optional in matches:
+                entry = {"id": f"REQ-{len(result) + 1:02}", "text": text[:500],
+                         "source": {key: chunk[key] for key in ("file_id", "page", "section") if key in chunk},
+                         "status": "needs_review"}
+                if section == "optional" or optional:
+                    entry["optional"] = True
+                result.append(entry)
+                if len(result) >= 30:
+                    return result
     return result
 
 

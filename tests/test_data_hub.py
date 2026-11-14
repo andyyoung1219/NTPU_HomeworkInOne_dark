@@ -1,6 +1,8 @@
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -124,6 +126,67 @@ def test_resync_replaces_cached_draft_with_verified_submission(hub_service, monk
     assert "hidden" not in service.get("assignment", "101")
 
 
+@pytest.mark.parametrize("replacement", ["size", "modified_at", "legacy_metadata", "unversioned"])
+def test_assignment_attachment_redownloads_replaced_bytes_without_changing_task_snapshot(
+        hub_service, monkeypatch, replacement):
+    service = hub_service
+    filename = "assignment.txt"
+    url = "https://lms3.ntpu.edu.tw/pluginfile.php/1/assignment.txt"
+    ref = hashlib.sha256(("101" + url).encode()).hexdigest()[:24]
+    content = b"Old source\n"
+    modified_at = None if replacement == "unversioned" else 100
+    original_list = service.moodle.list_assignments
+
+    def list_assignments(course_id):
+        original_list(course_id)
+        service.moodle.assets[ref] = {"assignment_id": "101", "filename": filename, "fileurl": url,
+                                      "filesize": len(content), "timemodified": modified_at, "mimetype": "text/plain"}
+
+    calls = []
+
+    def download(identifier):
+        assert identifier == ref
+        calls.append(content)
+        source = service.root / "download.txt"
+        source.write_bytes(content)
+        return {"path": source, "sha256": hashlib.sha256(content).hexdigest(),
+                "chunks": [{"text": content.decode(), "section": 1}] if len(calls) == 1 else []}
+
+    monkeypatch.setattr(service.moodle, "list_assignments", list_assignments)
+    monkeypatch.setattr(service.moodle, "download", download)
+    service.sync_assignments("1")
+    parsed = service.download("101", [ref])
+    original = parsed["assets"][0]
+    task = service.create_task({"assignment_id": "101", "selected_asset_ids": [ref],
+                                "excerpt": parsed["excerpt"]}, "before-replacement")
+    snapshot = service.workspace(service.user, task["id"]) / "input" / (original["sha256"] + ".txt")
+    assert snapshot.read_bytes() == content
+
+    if replacement == "legacy_metadata":
+        original.pop("modified_at")
+        service.store.save(service.user, "asset", ref, original)
+    if replacement == "modified_at":
+        modified_at += 1
+    content = b"New larger source\n" if replacement == "size" else b"New source\n"
+    service.sync_assignments("1")
+    refreshed = service.get("asset", ref)
+    assert refreshed["modified_at"] == modified_at
+    assert refreshed["status"] == "not_downloaded"
+    assert not {"path", "sha256", "chunks", "flags", "parser_version", "downloaded_at"} & refreshed.keys()
+    with pytest.raises(StudyError, match="ASSET_CHANGED"):
+        service.approve(task["id"], task["request_sha256"])
+
+    parsed = service.download("101", [ref])
+    assert content.decode().strip() in parsed["excerpt"] and "Old source" not in parsed["excerpt"]
+    assert calls == [b"Old source\n", content]
+    assert snapshot.read_bytes() == b"Old source\n"
+    assert service.get("task", task["id"])["source_hashes"][ref] == original["sha256"]
+    if replacement != "unversioned":
+        service.sync_assignments("1")
+        service.download("101", [ref])
+        assert calls == [b"Old source\n", content]
+
+
 def test_live_views_query_latest_semester_and_fetch_each_visit(hub_service, monkeypatch):
     service = hub_service
     old = service.get("course", "2")
@@ -148,15 +211,66 @@ def test_live_views_query_latest_semester_and_fetch_each_visit(hub_service, monk
         client.get("/unlock/live-test")
         cached = client.get("/api/dashboard").json()["data"]
         assert len(cached["assignments"]) == 2 and not called
+        pending = client.get("/api/dashboard?pending=true").json()["data"]
+        pending_course = client.get("/api/learning/courses/2?pending=true").json()["data"]
+        assert not called
+        assert pending["submission_refresh_pending"] and pending_course["submission_refresh_pending"]
+        assert [(a["id"], a["submission_label"]) for a in pending["assignments"]] == [("101", "更新中")]
+        assert [(a["id"], a["submission_label"]) for a in pending_course["assignments"]] == [("102", "更新中")]
+        assert not pending["overdue"] and not pending["unknown"]
         first = client.get("/api/dashboard?live=true").json()["data"]
         second = client.get("/api/dashboard?live=true").json()["data"]
         archived = client.get("/api/learning/courses/2?live=true").json()["data"]
     assert called == [101, 101, 102]
     assert first["submission_refresh_error"] is None
+    assert first["submission_scope"] == pending["submission_scope"] == pending_course["submission_scope"]
     assert [(a["id"], a["submission_label"]) for a in first["assignments"]] == [("101", "已提交")]
     assert second["assignments"][0]["submission_label"] == "未完成"
     assert archived["assignments"][0]["submission_label"] == "已提交"
     assert service.get("assignment", "101")["submission_status"] == "draft"
+
+
+def test_overlapping_live_views_share_observations_and_later_visits_fetch_again(hub_service, monkeypatch):
+    service = hub_service
+    service.sync_assignments("1")
+    service.sync_assignments("2")
+    deadline = datetime.now(UTC).timestamp() + 3600
+    for offset, identifier in enumerate(("101", "102")):
+        assignment = service.get("assignment", identifier)
+        service.store.save(service.user, "assignment", identifier, {**assignment, "due_at": deadline + offset})
+    next_assignment = Event()
+    finish_dashboard = Event()
+    calls, credential_checks = [], []
+
+    def credentials(*, expected_user):
+        credential_checks.append(expected_user)
+        return "synthetic-token", FUNCTIONS
+
+    def submission(function, token, params):
+        identifier = params["assignid"]
+        calls.append(identifier)
+        if identifier == 102:
+            next_assignment.set()
+            assert finish_dashboard.wait(5)
+        state = "draft" if calls.count(identifier) > 1 else "submitted"
+        return 200, {"lastattempt": {"submission": {"status": state}}}
+
+    monkeypatch.setattr(service.moodle, "credentials", credentials)
+    monkeypatch.setattr(service.moodle.client, "call", submission)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        dashboard = executor.submit(service.learning.dashboard, live=True)
+        try:
+            assert next_assignment.wait(5)
+            course = executor.submit(service.learning.course, "1", live=True).result(timeout=5)
+            assert course["assignments"][0]["submission_label"] == "已提交"
+            assert calls == [101, 102] and credential_checks == [service.user]
+        finally:
+            finish_dashboard.set()
+        assert all(item["submission_label"] == "已提交" for item in dashboard.result()["assignments"])
+
+    later = service.learning.course("1", live=True)
+    assert later["assignments"][0]["submission_label"] == "未完成"
+    assert calls == [101, 102, 101] and credential_checks == [service.user] * 2
 
 
 def test_live_rate_limit_keeps_only_verified_results_and_does_not_reuse_cached_labels(hub_service, monkeypatch):

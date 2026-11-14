@@ -40,6 +40,7 @@ class CompletionUnit(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     objective: str = Field(min_length=1, max_length=1500)
     kind: Literal["writing", "python", "research", "manual"]
+    optional: bool = False
     dependencies: list[UnitID] = Field(default_factory=list, max_length=MAX_DELIVERABLES - 1)
     optional_dependencies: list[UnitID] = Field(default_factory=list, max_length=MAX_DELIVERABLES - 1)
     source_ids: list[SourceID] = Field(default_factory=list, max_length=20)
@@ -78,7 +79,19 @@ def validate_deliverables(units):
     return ordered
 
 
-def unit_blockers(unit, task, runner_available):
+def mandatory_unit_requirements(units, mandatory_ids):
+    """Associate hard prerequisites with the assignment requirements they support."""
+    direct = {unit["id"]: [ref for ref in unit.get("requirement_ids", []) if ref in mandatory_ids]
+              for unit in units if not unit.get("optional")}
+    required_by = {unit_id: list(refs) for unit_id, refs in direct.items()}
+    for unit in reversed(units):
+        for prerequisite in unit.get("dependencies", []):
+            if unit["id"] in required_by and prerequisite in required_by:
+                required_by[prerequisite].extend(required_by[unit["id"]])
+    return {unit_id: list(dict.fromkeys(refs or required_by[unit_id])) for unit_id, refs in direct.items()}
+
+
+def unit_blockers(unit, task, runner_available, supplemental_csv=False):
     """Describe the inputs or capabilities the workbench cannot provide."""
     title = unit["title"]
     kind = unit["kind"]
@@ -89,9 +102,6 @@ def unit_blockers(unit, task, runner_available):
     def add(en, zh):
         actions.append(en if english else zh)
 
-    if kind == "manual":
-        add(f"Complete “{title}” manually. {unit['objective']}",
-            f"請自行完成「{title}」。{unit['objective']}")
     if kind == "research" or "public-literature" in requirements:
         add(f"Approve an exact literature query in guided mode, then add its verified sources to “{title}”.",
             f"請在逐步模式核准具體的文獻查詢，再把查證的來源補入「{title}」。")
@@ -116,15 +126,18 @@ def unit_blockers(unit, task, runner_available):
     if "public-uci-dataset" in requirements and not data.get("datasets"):
         add(f"Provide the required UCI dataset for “{title}” before reporting results.",
             f"請提供「{title}」所需的 UCI 資料集，再補上結果。")
-    if "csv-profiling" in requirements:
+    if "csv-profiling" in requirements and not supplemental_csv:
         csv_sources = {asset["id"] for asset in task.get("completion_inputs", {}).get("assets", [])
                        if Path(asset["name"]).suffix.lower() == ".csv"}
         csv_sources.update(ref for ref in unit["source_ids"] if ref.startswith("dataset:"))
         requested = csv_sources.intersection(unit["source_ids"])
         profiled = {item["file_id"] for item in data.get("datasets", []) + data.get("attachment_profiles", [])}
-        if not profiled or requested - profiled:
-            add(f"Provide a readable CSV for “{title}” before reporting data summaries.",
-                f"請提供「{title}」所需的可讀 CSV，再補上統計摘要。")
+        missing_csv = requested - profiled
+        if not profiled or missing_csv:
+            names = ", ".join(task.get("source_names", {}).get(ref, ref) for ref in sorted(missing_csv))
+            files = f" ({names})" if names else ""
+            add(f"Provide a readable CSV for “{title}”{files} before reporting data summaries.",
+                f"請提供「{title}」所需的可讀 CSV{files}，再補上統計摘要。")
     missing_sources = sorted(set(unit["source_ids"]) - task.get("source_hashes", {}).keys())
     if missing_sources:
         names = ", ".join(missing_sources)
@@ -134,4 +147,7 @@ def unit_blockers(unit, task, runner_available):
         names = ", ".join(unit["expected_artifacts"])
         add(f"Produce the separate files required for “{title}” ({names}).",
             f"請為「{title}」另行產出指定的檔案（{names}）。")
+    if kind == "manual" and not actions:
+        add(f"Complete “{title}” manually. {unit['objective']}",
+            f"請自行完成「{title}」。{unit['objective']}")
     return actions

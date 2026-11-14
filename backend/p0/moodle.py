@@ -5,7 +5,9 @@ import importlib.util
 import io
 import ipaddress
 import json
+import os
 import socket
+import threading
 import urllib.parse
 import zipfile
 from pathlib import Path
@@ -30,8 +32,38 @@ HOST = "lms3.ntpu.edu.tw"
 SERVICE = "NTPU.HomeworkInOne.P0"
 
 
+def ephemeral_vault_enabled():
+    return os.environ.get("NTPU_EPHEMERAL_VAULT") == "1"
+
+
+class MemoryVault:
+    """Keep Moodle session tokens in memory where no OS keychain is available."""
+
+    def __init__(self):
+        self._entries = {}
+        self._lock = threading.Lock()
+
+    def set_password(self, service, account, value):
+        with self._lock:
+            self._entries[service, account] = value
+
+    def get_password(self, service, account):
+        with self._lock:
+            return self._entries.get((service, account))
+
+    def delete_password(self, service, account):
+        with self._lock:
+            self._entries.pop((service, account), None)
+
+
+_memory_vault = MemoryVault()
+
+
 class Vault:
     def __init__(self):
+        if ephemeral_vault_enabled():
+            self.backend = _memory_vault
+            return
         # Only use an OS credential backend, never a plaintext fallback.
         backend = keyring.get_keyring()
         if type(backend).__module__ not in {

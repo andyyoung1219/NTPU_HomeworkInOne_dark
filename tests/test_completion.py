@@ -25,6 +25,8 @@ class CompletionAI:
         self.execution = execution
         self.report_factory = report_factory
         self.plan_blockers = []
+        self.plan_blocker_requirements = []
+        self.plan_options = {}
 
     def rpc(self, method, **kwargs):
         return {"ready": True}
@@ -37,6 +39,8 @@ class CompletionAI:
                 "objective": "Compare measured values and explain the selected approach.",
                 "deliverable_type": "report", "dataset_id": self.dataset_id,
                 "needs_execution": self.execution, "research_query": "", "blockers": self.plan_blockers,
+                "blocker_requirements": self.plan_blocker_requirements,
+                **self.plan_options,
             }
         elif "previous_code" in payload:
             result = {"code": "import json\nassert sum([1, 2, 3]) == 6\nprint(json.dumps({'sum': 6}))\n"}
@@ -130,7 +134,11 @@ def test_pdf_submission_and_missing_filename_identity_do_not_block_report(automa
 
 def test_missing_content_becomes_an_action_and_preserves_the_available_report(automatic):
     service = automatic
-    service.ai.plan_blockers = ["Provide the required interview data and add its analysis; interview findings are unavailable."]
+    assignment = service.get("assignment", "2")
+    requirement = "Provide the required interview data and add its analysis."
+    assignment.update(asset_ids=[], description=requirement)
+    service.store.save(service.user, "assignment", "2", assignment)
+    service.ai.plan_blocker_requirements = [{"requirement_id": "REQ-01", "quote": requirement}]
     task = service.complete_assignment("2", "required-content")
     result = await_task(service, task["id"])
     assert result["status"] == "waiting_review" and result["error"] is None
@@ -138,7 +146,8 @@ def test_missing_content_becomes_an_action_and_preserves_the_available_report(au
     assert result["completion"]["blockers"] == []
     assert result["checkpoint"]["cursor"] == 5 and result["checkpoint"]["consecutive_errors"] == 0
     assert len(service.ai.calls) == 2
-    assert "interview data" in result["draft"] and "## Required user actions" in result["draft"]
+    assert any("interview data" in action for action in result["completion"]["required_actions"])
+    assert "## Required user actions" not in result["draft"]
     assert "The supplied sources establish" in result["draft"]
     assert not result["ready_for_export"]
     service.save_draft(result["id"], result["draft"], reviewed=True)
@@ -179,7 +188,7 @@ def test_execution_without_sandbox_generates_report_with_unverified_execution_ac
     assert result["checkpoint"]["cursor"] == 5
     assert not result["ready_for_export"]
     assert len(service.ai.calls) == 3
-    assert "execution has not been verified" in result["draft"]
+    assert any("execution has not been verified" in action for action in result["completion"]["required_actions"])
     assert "analysis.py" in result["generated_files"]
     code = service.safe_path(result["generated_files"]["analysis.py"]["path"]).read_bytes()
     assert code == result["completion_execution"]["code"].encode()

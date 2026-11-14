@@ -279,7 +279,7 @@ class AgentEngine:
                     if step["tool"] == "complete_deliverable":
                         from backend.agent.completion_units import fallback_unit
 
-                        result = fallback_unit(task, step["required_inputs"]["unit_id"], code)
+                        result = fallback_unit(task, step["required_inputs"]["unit_id"], code, engine=self, user=user)
                     else:
                         from backend.agent.completion import fallback
 
@@ -499,7 +499,8 @@ class AgentEngine:
             "若有核准附件圖像，依可見內容辨識圖表與公式，公式轉 LaTeX；不可見或模糊部分列入 unresolved。"
             "依本次題目與需求清單明確指定的語言撰寫，未指定時使用繁體中文；"
             "語言細節遵循 report-writer 的 language 與 format 規則。"
-            "每個要求須有對應章節；不足的要求列入 unresolved。回覆純 JSON："
+            "每個必交要求須有對應章節；unresolved 只列題目明確要求但尚未完成的事項，標記已有的 REQ 編號。"
+            "選做、額外指標及延伸建議留在正文。回覆純 JSON："
             '{"title":"標題","sections":[{"heading":"章節","content":"內容"}],'
             '"sources":["已提供的 file_id"],"unresolved":["缺漏"]}。\n'
             + json.dumps({"assignment": task["title"], "mode": MODES[request["mode"]],

@@ -68,6 +68,8 @@ class AIAdapter:
                 text=True, encoding="utf-8", bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            # Escape lone surrogates as JSON did before switching to UTF-8 text.
+            self.process.stdin.reconfigure(errors="backslashreplace")
             threading.Thread(target=self._read, args=(self.process,), daemon=True).start()
 
     def _read(self, process):
@@ -100,12 +102,16 @@ class AIAdapter:
         self.start()
         identifier = str(uuid.uuid4())
         future = concurrent.futures.Future()
-        with self.lock:
-            self.requests[identifier] = future
-            self.process.stdin.write(json.dumps({"id": identifier, "method": method, "params": params}) + "\n")
-            self.process.stdin.flush()
-        deadline = time.monotonic() + timeout_seconds
         try:
+            with self.lock:
+                # A concurrent cancel RPC either follows this write or the request is skipped.
+                if cancel is not None and cancel.is_set():
+                    raise AIError("CANCELLED")
+                self.requests[identifier] = future
+                request = {"id": identifier, "method": method, "params": params}
+                self.process.stdin.write(json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n")
+                self.process.stdin.flush()
+            deadline = time.monotonic() + timeout_seconds
             while True:
                 if cancel is not None and cancel.is_set():
                     raise AIError("CANCELLED")

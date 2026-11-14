@@ -7,8 +7,15 @@ const { createHash } = require('node:crypto');
 const sharp = require('sharp');
 const { BrowserBridge } = require('../vendor/src/browser');
 const { BrowserManager } = require('../vendor/src/browser/manager');
-const storageRoot = path.join(process.env.LOCALAPPDATA || os.homedir(), 'NTPU HomeworkInOne', 'p0');
-const browserOptions = { storageRoot, workspaces: [path.resolve(__dirname, '../..')] };
+const storageRoot = process.env.NTPU_AI_BRIDGE_STORAGE ||
+  path.join(process.env.LOCALAPPDATA || os.homedir(), 'NTPU HomeworkInOne', 'p0');
+const browserOptions = {
+  storageRoot,
+  workspaces: [path.resolve(__dirname, '../..')],
+  // In Docker the workbench can close the authenticated browser gracefully
+  // when the user returns to the workbench, giving Chromium time to save its profile.
+  ...(process.env.NTPU_AI_BRIDGE_STORAGE ? { loginNoticeDurationMs: 0 } : {}),
+};
 
 async function closeExtraTabs(context, primaryPage) {
   if (!context || !primaryPage || primaryPage.isClosed()) return;
@@ -33,9 +40,15 @@ async function chatWithTabCleanup(bridge, prompt, options) {
   };
   try {
     await closeBackgroundTabs();
-    return await bridge.chat(prompt, options);
+    options.signal?.throwIfAborted();
+    return await bridge.chat(prompt, { ...options, onUpload: name => {
+      // BrowserBridge calls this after its asynchronous checks, just before upload.
+      options.signal?.throwIfAborted();
+      options.onUpload?.(name);
+    } });
   } finally {
     await closeBackgroundTabs();
+    options.signal?.throwIfAborted();
   }
 }
 
@@ -45,7 +58,11 @@ let stopped = false;
 const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 const MAX_ATTACHMENT_ENCODED = Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4;
 const MAX_ATTACHMENT_PIXELS = 20000000;
-const MAX_VISUAL_REQUEST_CHARS = MAX_ATTACHMENT_ENCODED + 400000;
+const MAX_PROMPT_CHARS = 48000;
+// A JSON Unicode escape can use six wire characters for one UTF-16 code unit.
+const MAX_TEXT_REQUEST_CHARS = MAX_PROMPT_CHARS * 6 + 1024;
+const MAX_VISUAL_REQUEST_CHARS = MAX_ATTACHMENT_ENCODED + MAX_TEXT_REQUEST_CHARS;
+const MAX_CONTROL_REQUEST_CHARS = 100000;
 
 async function decodeAttachment(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -109,16 +126,22 @@ async function dispatch(method, params) {
       if (jobs.size) throw new Error('BUSY');
       if (!/^[a-z0-9-]{1,80}$/.test(params.task_id || '')) throw new Error('INVALID_REQUEST');
       if (params.approved !== true) throw new Error('APPROVAL_REQUIRED');
-      if (typeof params.prompt !== 'string' || params.prompt.length > 48000) throw new Error('INVALID_REQUEST');
+      if (typeof params.prompt !== 'string' || params.prompt.length > MAX_PROMPT_CHARS) throw new Error('INVALID_REQUEST');
       if (params.timeout_ms !== undefined && (!Number.isInteger(params.timeout_ms)
           || params.timeout_ms < 1 || params.timeout_ms > 300000)) throw new Error('INVALID_REQUEST');
       // Reference only; never accept or resolve caller-provided file paths.
       if (params.asset_ref && !/^[a-f0-9]{24}$/.test(params.asset_ref)) throw new Error('INVALID_REFERENCE');
-      const attachment = params.attachment === undefined ? undefined : await decodeAttachment(params.attachment);
-      // Image decoding yields; recheck before claiming the single chat slot.
-      if (jobs.size) throw new Error('BUSY');
       const controller = new AbortController();
       jobs.set(params.task_id, controller);
+      let attachment;
+      try {
+        if (params.attachment !== undefined) attachment = await decodeAttachment(params.attachment);
+        controller.signal.throwIfAborted();
+      } catch (error) {
+        jobs.delete(params.task_id);
+        controller.signal.throwIfAborted();
+        throw error;
+      }
       void chatWithTabCleanup(bridge, params.prompt, {
         signal: controller.signal, timeoutMs: params.timeout_ms ?? 180000,
         attachment,
@@ -147,20 +170,23 @@ async function dispatch(method, params) {
 if (require.main === module) {
   const input = readline.createInterface({ input: process.stdin });
   input.on('line', line => {
-  if (line.length > MAX_VISUAL_REQUEST_CHARS) return;
-  let request;
-  try { request = JSON.parse(line); } catch { return; }
-  if (line.length > 100000 && (request.method !== 'start_task' || !request.params?.attachment)) {
-    output({ id: request.id, error: { code: 'INVALID_REQUEST' } }); return;
-  }
-  void dispatch(request.method, request.params || {})
-    .then(result => { output({ id: request.id, result }); if (stopped) process.exit(0); })
-    .catch(error => output({ id: request.id, error: { code:
-      ['BUSY', 'INVALID_REQUEST', 'APPROVAL_REQUIRED', 'METHOD_NOT_ALLOWED', 'INVALID_REFERENCE',
-        'INVALID_ATTACHMENT', 'ATTACHMENT_APPROVAL_REQUIRED', 'ATTACHMENT_CHANGED'].includes(error.message)
-        ? error.message : bridgeErrorCode(error) } }));
-});
-input.on('close', () => { void bridge.close({ cleanup: false }).finally(() => process.exit(0)); });
+    if (line.length > MAX_VISUAL_REQUEST_CHARS) return;
+    let request;
+    try { request = JSON.parse(line); } catch { return; }
+    const limit = request.method === 'start_task'
+      ? (request.params?.attachment ? MAX_VISUAL_REQUEST_CHARS : MAX_TEXT_REQUEST_CHARS)
+      : MAX_CONTROL_REQUEST_CHARS;
+    if (line.length > limit) {
+      output({ id: request.id, error: { code: 'INVALID_REQUEST' } }); return;
+    }
+    void dispatch(request.method, request.params || {})
+      .then(result => { output({ id: request.id, result }); if (stopped) process.exit(0); })
+      .catch(error => output({ id: request.id, error: { code:
+        ['BUSY', 'INVALID_REQUEST', 'APPROVAL_REQUIRED', 'METHOD_NOT_ALLOWED', 'INVALID_REFERENCE',
+          'INVALID_ATTACHMENT', 'ATTACHMENT_APPROVAL_REQUIRED', 'ATTACHMENT_CHANGED'].includes(error.message)
+          ? error.message : bridgeErrorCode(error) } }));
+  });
+  input.on('close', () => { void bridge.close({ cleanup: false }).finally(() => process.exit(0)); });
 }
 
-module.exports = { decodeAttachment, MAX_ATTACHMENT_BYTES, WorkspaceBrowserManager, chatWithTabCleanup, bridgeErrorCode };
+module.exports = { decodeAttachment, MAX_ATTACHMENT_BYTES, WorkspaceBrowserManager, chatWithTabCleanup, bridgeErrorCode, browserOptions };
